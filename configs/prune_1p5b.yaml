@@ -1,0 +1,29 @@
+# Stage 2 pruning: distilled 4B -> ~1.5B width prune (Minitron-style, keep all 28 layers).
+
+model:
+  source: checkpoints/distill_4b     # stage-1 distilled 4B
+  out_dir: checkpoints/pruned_1p5b
+  frozen_encoders: true
+
+targets:
+  hidden: 1536                       # 2560 -> 1536
+  intermediate: 8960                 # 13312 -> 8960
+  # GQA-consistent with the stage-1 pruned geometry (20 Q / 4 KV, group size
+  # 5): the target group size q_heads/kv_heads must not exceed 5.
+  # 10/2 keeps group size 5 (two full KV groups kept intact).
+  q_heads: 10                        # 20 -> 10
+  kv_heads: 2                        # 4 -> 2 (keep qat_export.yaml n_kv_heads in sync)
+  layers: 28
+
+importance:
+  calib_batches: 64
+  calib_manifest: data/manifests/calib.jsonl
+  batch_size: 2
+  seq_len: 4096
+  device: cuda:0
+
+connectors:
+  prune: true
+embeddings:
+  prune_columns: true
+  tie_word_embeddings: true          # tie lm_head to embed_tokens (~233M saved; all tokens stay representable)

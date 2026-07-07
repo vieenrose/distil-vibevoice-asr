@@ -1,0 +1,127 @@
+# Data plan: sources, mix ratios, normalization, dedupe.
+# All Chinese text targets normalized Traditional/Taiwan (OpenCC s2twp),
+# English spans protected from conversion.
+
+paths:
+  root: data
+  raw: data/raw                      # downloaded / extracted audio
+  synthetic: data/synthetic          # VibeVoice-TTS generated meetings
+  pseudo: data/pseudo                # teacher-pseudo-labeled real audio
+  simulated: data/simulated          # simulated overlap mixtures
+  gold: data/gold                    # human-verified meetings
+  manifests: data/manifests          # JSONL MeetingRecord manifests
+  eval_manifests:                    # held-out eval sets (dedupe reference)
+    - data/manifests/eval_gold.jsonl
+    - data/manifests/eval_codeswitch.jsonl
+    - data/manifests/eval_longform.jsonl
+  speaker_bank: data/speaker_bank    # TW-accent voice-clone prompts for TTS
+  rir_dir: data/aug/RIRS_NOISES      # openslr 28
+  musan_dir: data/aug/musan          # openslr 17
+
+audio:
+  sample_rate: 24000                 # teacher acoustic tokenizer expects 24 kHz mono
+  mono: true
+
+# Target mix of total training hours.
+mix_ratios:
+  tts_synthetic: 0.40                # VibeVoice-TTS meetings (TW-accent cloning + augmentation)
+  pseudo_labeled: 0.40               # 8B-teacher labels on real audio
+  simulated_mixtures: 0.15           # exact overlap labels from simulate_meetings
+  gold: 0.05
+
+# Verified 2026-07-04 (HF API + tree). All sources below are PUBLIC + UNGATED.
+# None dead/gated -> no repo replacements needed. See docs/DATA_PLAN.md for the
+# full plan (hours, disk, mix mapping, gaps, license obligations).
+sources:
+  common_voice_zhtw:
+    hf_id: fsicoli/common_voice_22_0
+    subset: zh-TW
+    license: cc0-1.0
+    role: [pseudo, tts_voice_bank, simulated]
+    # ~30h validated read speech (~50k clips). Legacy .py loader breaks the HF
+    # viewer AND load_dataset() on datasets>=3.0 -> fetch audio/zh-TW/* +
+    # transcript/zh-TW/* by path (the script's include glob already does this);
+    # join clips->labels via transcript/zh-TW/validated.tsv, group by client_id.
+  yodas_zh:
+    hf_id: espnet/yodas2
+    subset: zh000
+    license: cc-by-3.0
+    role: [pseudo]
+    # zh000 config ~60 GB (42 tar.gz shards). Loading script -> no viewer;
+    # stream/stage shard-by-shard. mixes zh-CN/zh-TW: filter Traditional-script
+    # channels (OpenCC round-trip / hanzidentifier), then s2twp. ~200h TW-usable.
+  yodas_en:
+    hf_id: espnet/yodas2
+    subset: en000
+    license: cc-by-3.0
+    role: [pseudo]
+    # en000 config ~69 GB (50 shards) ~= ~400h English. Stream/stage shard-by-shard.
+  ivod_meta:
+    hf_id: openfun/tw-ly-ivod
+    license: cc-by-4.0
+    role: [pseudo]
+    # METADATA/TRANSCRIPT INDEX ONLY (~0.85 GB jsonl, per-year ivod-YYYY.jsonl).
+    # whisperx transcripts are pseudo; the Legislative-Yuan meeting AUDIO is NOT
+    # bundled and must be fetched from LY IVOD separately (potential 1000h+),
+    # then re-labeled with the 8B teacher.
+  ivod_fine_tune:
+    hf_id: openfun/ivod-fine-tune
+    license: cc-by-4.0
+    role: [tts_voice_bank, simulated, gold]
+    # ~18.6 GB+ real zh-TW LY speech as speaker-labeled sentence segments
+    # (sentence_wavs/*.tar + sentence_texts + per-speaker data/*.json), ~130h.
+    # SINGLE-speaker segments, NOT multi-speaker diarized meeting audio -> use as
+    # gold zh-TW transcripts + TW-accent voice bank + simulate-mixture source.
+  ascend:
+    hf_id: CAiRE/ASCEND
+    license: cc-by-sa-4.0
+    role: [pseudo, simulated]
+    # ~10.6h zh-en code-switch (HK/mainland accent). SHARE-ALIKE: any redistributed
+    # derived DATASET must be CC-BY-SA. convert transcripts with s2twp.
+  ami:
+    hf_id: edinburghcstr/ami
+    configs: [ihm, sdm]         # script default include=[ihm/*] (~24.5 GB); add sdm/* if needed
+    license: cc-by-4.0
+    role: [gold]
+    # ENGLISH meetings (~100h, diarized). Gold for the ENGLISH side / diarization
+    # pipeline validation only -- does NOT satisfy the zh-TW gold bucket.
+
+  # GAP: no public real zh-TW multi-speaker DIARIZED meeting corpus exists.
+  # The gold(0.05) bucket for zh-TW must be self-recorded + hand-annotated
+  # (~30-50h). Placeholder for the eventual self-recorded set:
+  gold_zhtw_selfrecord:
+    hf_id: null                 # not on HF; record + annotate in-house
+    license: TBD (owned)
+    role: [gold]
+    notes: ~30-50h real zh-TW meetings, human diarization + verbatim transcripts
+
+normalization:
+  opencc_profile: s2twp              # Simplified -> Traditional (Taiwan) w/ phrase conversion
+  protect_english_spans: true
+
+pseudo_label:
+  teacher_path: models/teacher
+  device: cuda:0
+  dtype: bfloat16
+  min_mean_logprob: -0.5             # filter_by_confidence threshold
+  two_pass_agreement_max_cpwer: 0.05
+
+dialogue_scripts:
+  n_scripts: 20000
+  # must be a subset of dialogue_scripts.DOMAINS (generate_scripts validates)
+  domains: [product_standup, sales_review, engineering_sync, budget_planning, hiring]
+  seed: 0
+
+augmentation:
+  codec_prob: 0.3
+  snr_db_range: [5.0, 25.0]
+
+simulate:
+  overlap_ratio: 0.10
+  silence_range: [0.2, 1.5]
+  speakers_range: [2, 8]
+
+dedupe:
+  enabled: true
+  method: audio_fingerprint          # spectral hash, distil_vibevoice.data.dedupe
+  # every training record is checked against build_eval_index(eval_manifests)

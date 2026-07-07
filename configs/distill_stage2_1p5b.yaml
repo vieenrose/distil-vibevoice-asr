@@ -1,0 +1,62 @@
+# Stage 2 distillation: 4B teacher -> pruned 1.5B student,
+# with 10% of batches distilled DIRECTLY from the 8B original teacher,
+# plus length + speaker-count curricula.
+
+model:
+  student_init: checkpoints/pruned_1p5b
+  teacher: checkpoints/distill_4b    # 4B is the primary (TA) teacher
+  ta_teacher: checkpoints/distill_4b # teacher-assistant path (explicit alias)
+  direct_teacher: models/teacher     # original 8B
+  direct_8b_fraction: 0.1            # fraction of batches taught by the 8B directly
+  out_dir: checkpoints/distill_1p5b
+  student_device: cuda:0
+  teacher_device: cuda:1
+
+loss:
+  T: 2.0
+  w_kl: 0.5
+  w_ce: 0.3
+  w_hidden: 0.2
+  speaker_ts_upweight: 4.0
+  hidden_proj: linear
+  layer_map: default                 # default_layer_map(28, 28)
+
+data:
+  train_manifest: data/manifests/train.jsonl
+  eval_manifest: data/manifests/eval_gold.jsonl
+  # audio-length curriculum: 30s -> 5min -> 15min windows
+  length_curriculum:
+    - { max_audio_s: 30,  until_frac: 0.3 }
+    - { max_audio_s: 300, until_frac: 0.7 }
+    - { max_audio_s: 900, until_frac: 1.0 }
+  # speaker-count curriculum: 2 -> 4 -> 8 speakers
+  speaker_curriculum:
+    - { max_speakers: 2, until_frac: 0.3 }
+    - { max_speakers: 4, until_frac: 0.7 }
+    - { max_speakers: 8, until_frac: 1.0 }
+  seq_len_curriculum:
+    - { max_len: 4096,  until_frac: 0.3 }
+    - { max_len: 8192,  until_frac: 0.7 }
+    - { max_len: 16384, until_frac: 1.0 }
+
+optim:
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  optimizer_8bit: true
+
+train:
+  bf16: true
+  micro_batch_size: 1
+  grad_accum: 16
+  max_steps: 80000
+  eval_every: 2000
+  save_every: 2000
+  keep_checkpoints: 3
+  log_every: 20
+  seed: 42
+  gradient_checkpointing: true

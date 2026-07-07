@@ -1,0 +1,21 @@
+model:
+  source: models/teacher         # auto-extracted from models/teacher if absent
+  out_dir: models/student_1p5b_realcalib
+  frozen_encoders: true
+targets:
+  hidden: 1536
+  intermediate: 8960
+  q_heads: 12                        # 28->12; group 6 (<= source group 7) OK for direct 8B->1.5B
+  kv_heads: 2
+  layers: 28
+importance:
+  calib_batches: 48
+  calib_manifest: data/pseudo/ivod_train.jsonl   # REAL Traditional-Chinese meeting text
+  batch_size: 2
+  seq_len: 2048
+  device: cuda:0
+connectors:
+  prune: true
+embeddings:
+  prune_columns: true
+  tie_word_embeddings: true

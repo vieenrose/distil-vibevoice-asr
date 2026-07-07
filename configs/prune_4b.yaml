@@ -1,0 +1,27 @@
+# Stage 1 pruning: teacher LLM (Qwen2.5-7B backbone of VibeVoice-ASR) -> ~4B width prune.
+# Minitron-style: activation-magnitude importance, keep ALL 28 layers, cut width.
+
+model:
+  source: models/teacher             # 8B teacher (LLM backbone extracted for pruning)
+  out_dir: checkpoints/pruned_4b
+  frozen_encoders: true              # acoustic + semantic tokenizers untouched (frozen at all stages)
+
+targets:
+  hidden: 2560                       # 3584 -> 2560
+  intermediate: 13312                # 18944 -> 13312
+  q_heads: 20                        # 28 -> 20
+  kv_heads: 4                        # 4 -> 4 (unchanged)
+  layers: 28                         # keep all layers (width-only prune)
+
+importance:
+  calib_batches: 64                  # compute_importance(num_batches=64)
+  calib_manifest: data/manifests/calib.jsonl
+  batch_size: 2
+  seq_len: 4096
+  device: cuda:0
+
+connectors:
+  prune: true                        # prune acoustic/semantic->LLM projectors on hidden_keep_idx
+embeddings:
+  prune_columns: true                # embed_tokens / lm_head: keep all vocab rows, cut columns
+  tie_word_embeddings: true          # tie lm_head to embed_tokens (~233M saved; all tokens stay representable)

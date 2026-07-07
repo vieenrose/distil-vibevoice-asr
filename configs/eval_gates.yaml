@@ -1,0 +1,53 @@
+# Release gates: run_gates(ref_manifest, hyp_manifest, thresholds) must pass
+# before a checkpoint is promoted. Metrics from distil_vibevoice.eval.
+#   mer            mixed error rate (zh chars + en words)
+#   cpwer          concatenated-permutation WER (speaker-attributed)
+#   der            diarization error rate (collar 0.25s)
+#   timestamp_mae  mean absolute error of segment boundaries, seconds
+
+manifests:
+  ref: data/manifests/eval_gold.jsonl
+  hyp: runs/eval/hyp.jsonl
+
+der:
+  collar: 0.25
+  step: 0.01
+
+# Overall thresholds (all slices pooled).
+thresholds:
+  mer: 0.12
+  cpwer: 0.16
+  der: 0.12
+  timestamp_mae: 0.3
+
+# Per-slice thresholds; a slice selects records by manifest field match.
+slices:
+  codeswitch:                        # intra-sentential zh/en mixing
+    select: { language: zh-TW-en }
+    thresholds:
+      mer: 0.15
+      cpwer: 0.19
+      der: 0.12
+      timestamp_mae: 0.3
+  zh_only:
+    select: { language: zh-TW }
+    thresholds:
+      mer: 0.10
+      cpwer: 0.14
+  en_only:
+    select: { language: en }
+    thresholds:
+      mer: 0.12
+      cpwer: 0.16
+  longform:                          # >= 15 min meetings, chunked inference path
+    select: { source: eval_longform }
+    thresholds:
+      mer: 0.14
+      cpwer: 0.18
+      der: 0.14
+      timestamp_mae: 0.4
+  overlap_heavy:                     # simulated mixtures with exact overlap labels
+    select: { source: eval_overlap }
+    thresholds:
+      der: 0.16
+      cpwer: 0.20

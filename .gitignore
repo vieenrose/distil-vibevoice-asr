@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual env
+.venv/
+venv/
+
+# Model weights / checkpoints / large artifacts
+models/
+checkpoints/
+runs/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+*.onnx
+
+# Data (managed outside git; manifests under data/manifests may be re-generated)
+data/
+!data/manifests/.gitkeep
+
+# Audio scratch
+*.wav
+*.flac
+*.mp3
+*.m4a
+
+# Logs / experiment tracking
+logs/
+tensorboard/
+wandb/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Notebooks
+.ipynb_checkpoints/
+vendor/
+.venv_tts/
+vendor/

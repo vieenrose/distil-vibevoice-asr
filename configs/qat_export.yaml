@@ -1,0 +1,53 @@
+# Quantization-aware training + mobile export for the 1.5B student.
+# Target: int4 weights / int8 activations, ~2.2-2.3 GB peak RAM on a 6 GB phone.
+
+model:
+  source: checkpoints/distill_1p5b
+  out_dir: checkpoints/qat_1p5b
+  export_dir: export/1p5b_int4
+
+quant:
+  weights: int4                      # group-wise weight quant
+  activations: int8
+  group_size: 128
+  symmetric_weights: true
+  # keep these in higher precision (quality-critical, small share of params)
+  skip_modules: [lm_head, embed_tokens]
+  kv_cache_dtype: fp16
+
+encoders:
+  quant: int4                        # frozen acoustic+semantic encoders, ~0.7B params
+  params_b: 0.7
+
+qat:
+  steps: 8000
+  lr: 2.0e-5
+  schedule: cosine
+  warmup_steps: 200
+  bf16: true
+  micro_batch_size: 1
+  grad_accum: 16
+  distill_from: checkpoints/distill_4b   # keep KL to 4B during QAT
+  T: 2.0
+  w_kl: 0.5
+  w_ce: 0.5
+  speaker_ts_upweight: 4.0
+  seed: 42
+
+export:
+  format: gguf                       # TODO-verify: final mobile runtime (llama.cpp-style vs ExecuTorch)
+  context_tokens: 8192
+  ram_budget:                        # arguments for runtime.ram_budget.estimate_ram
+    params_b: 1.5
+    quant: int4
+    n_layers: 28
+    n_kv_heads: 2
+    head_dim: 128
+    context_tokens: 8192
+    kv_dtype: fp16
+    encoder_params_b: 0.7
+    encoder_quant: int4
+    vocab: 152064
+    hidden: 1536
+    overhead_gb: 0.4
+  max_total_gb: 2.4                  # hard ceiling for the export gate

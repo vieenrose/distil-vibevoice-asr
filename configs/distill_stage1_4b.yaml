@@ -1,0 +1,50 @@
+# Stage 1 distillation: 8B teacher -> pruned 4B student.
+# L = 0.5*KL(teacher||student, T=2.0) + 0.3*CE(labels) + 0.2*MSE(mapped hidden states).
+# Speaker-tag and timestamp tokens upweighted 4x in CE/KL.
+
+model:
+  student_init: checkpoints/pruned_4b
+  teacher: models/teacher
+  out_dir: checkpoints/distill_4b
+  student_device: cuda:0
+  teacher_device: cuda:1             # teacher frozen, no-grad, on its own GPU
+
+loss:
+  T: 2.0
+  w_kl: 0.5
+  w_ce: 0.3
+  w_hidden: 0.2
+  speaker_ts_upweight: 4.0           # build_token_weights(upweight=4.0)
+  hidden_proj: linear                # learned per-mapped-layer student->teacher projection
+  layer_map: default                 # default_layer_map(28, 28) — identity for width-only prune
+
+data:
+  train_manifest: data/manifests/train.jsonl
+  eval_manifest: data/manifests/eval_gold.jsonl
+  # sequence-length curriculum: advance at the listed fraction of total steps
+  seq_len_curriculum:
+    - { max_len: 4096,  until_frac: 0.3 }
+    - { max_len: 8192,  until_frac: 0.7 }
+    - { max_len: 16384, until_frac: 1.0 }
+
+optim:
+  lr: 1.0e-4
+  schedule: cosine
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  optimizer_8bit: true               # bitsandbytes 8-bit AdamW
+
+train:
+  bf16: true
+  micro_batch_size: 1
+  grad_accum: 16                     # effective batch 16 sequences
+  max_steps: 60000
+  eval_every: 2000
+  save_every: 2000
+  keep_checkpoints: 3
+  log_every: 20
+  seed: 42
+  gradient_checkpointing: true
