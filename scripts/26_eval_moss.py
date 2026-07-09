@@ -16,14 +16,16 @@ from distil_vibevoice.eval.der import der
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="models/moss")
+    ap.add_argument("--skip", type=int, default=0)
     ap.add_argument("--manifest", default="data/pseudo/tts_all.jsonl")
     ap.add_argument("--n", type=int, default=5)
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
     dev = torch.device(args.device)
-    model = AutoModelForCausalLM.from_pretrained("models/moss", trust_remote_code=True, dtype="auto").to(torch.bfloat16).to(dev).eval()
-    proc = AutoProcessor.from_pretrained("models/moss", trust_remote_code=True)
-    recs = [json.loads(l) for l in open(args.manifest)][:args.n]
+    model = AutoModelForCausalLM.from_pretrained(args.model, trust_remote_code=True, dtype="auto").to(torch.bfloat16).to(dev).eval()
+    proc = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
+    recs = [json.loads(l) for l in open(args.manifest)][args.skip:args.skip+args.n]
     mers, ders = [], []
     for rec in recs:
         ref = [Segment(s["start"], s["end"], s["speaker"], s["text"]) for s in rec["segments"]]
