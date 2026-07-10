@@ -52,3 +52,4 @@ wandb/
 vendor/
 .venv_tts/
 vendor/
+space/examples/*.mp3

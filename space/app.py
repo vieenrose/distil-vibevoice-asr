@@ -30,7 +30,8 @@ from transformers import AutoModelForCausalLM, AutoProcessor
 MODEL_ID = os.environ.get("MOSS_MODEL_ID", "Luigi/moss-transcribe-diarize-zhtw")
 SR = 16000
 WINDOW_S = 300.0          # transcription window (5 min)
-AHC_THRESHOLD = 0.7       # cosine distance threshold for global speaker linking
+AHC_THRESHOLD = 0.45      # cosine distance for global speaker linking
+MIN_CORE_DUR_S = 3.0      # only segments this long participate in clustering
 MAX_NEW_TOKENS = 3072     # ~5 min of dense speech fits comfortably
 
 PROMPT = (
@@ -150,29 +151,48 @@ def embed_segment(wav: np.ndarray, start: float, end: float) -> np.ndarray | Non
 
 
 def link_speakers(segs: list[dict]) -> list[dict]:
-    """Global AHC over per-segment ECAPA embeddings -> S01/S02/... labels.
+    """Global speaker labels via core-segment AHC + nearest-centroid assign.
 
-    Segments without a usable embedding inherit the previous segment's label.
+    Validated on real 2h meetings: only segments >= MIN_CORE_DUR_S s join the
+    clustering (short segments have noisy embeddings and fragment clusters);
+    the rest snap to the nearest cluster centroid. Segments without a usable
+    embedding inherit the previous segment's label.
     """
     from scipy.cluster.hierarchy import fcluster, linkage
     from scipy.spatial.distance import pdist
 
-    idx = [i for i, s in enumerate(segs) if s["emb"] is not None]
+    embs = {i: s["emb"] for i, s in enumerate(segs) if s["emb"] is not None}
+    core = [i for i in embs
+            if segs[i]["end"] - segs[i]["start"] >= MIN_CORE_DUR_S]
+    lab_of: dict[int, int] = {}
+    if len(core) >= 2:
+        X = np.stack([embs[i] for i in core])
+        labs = fcluster(linkage(pdist(X, "cosine"), "average"),
+                        t=AHC_THRESHOLD, criterion="distance")
+        lab_of = {i: int(l) for i, l in zip(core, labs)}
+        cents: dict[int, list[np.ndarray]] = {}
+        for i, l in lab_of.items():
+            cents.setdefault(l, []).append(embs[i])
+        keys = list(cents)
+        M = np.stack([np.mean(cents[k], axis=0) for k in keys])
+        M /= np.linalg.norm(M, axis=1, keepdims=True)
+        for i in embs:
+            if i not in lab_of:
+                lab_of[i] = keys[int(np.argmax(M @ embs[i]))]
+    elif embs:
+        lab_of = {i: 1 for i in embs}
+
     out = [dict(s) for s in segs]
-    if len(idx) >= 2:
-        feats = np.stack([segs[i]["emb"] for i in idx])
-        labels = fcluster(linkage(pdist(feats, "cosine"), "average"),
-                          t=AHC_THRESHOLD, criterion="distance")
-        canon: dict[int, str] = {}
-        for i, lab in zip(idx, labels):
-            lab = int(lab)
-            if lab not in canon:
-                canon[lab] = f"S{len(canon) + 1:02d}"
-            out[i]["speaker"] = canon[lab]
+    canon: dict[int, str] = {}
     prev = "S01"
-    for s in out:
-        if s["emb"] is None:
+    for i, s in enumerate(out):
+        l = lab_of.get(i)
+        if l is None:
             s["speaker"] = prev
+        else:
+            if l not in canon:
+                canon[l] = f"S{len(canon) + 1:02d}"
+            s["speaker"] = canon[l]
         prev = s["speaker"]
     return out
 
