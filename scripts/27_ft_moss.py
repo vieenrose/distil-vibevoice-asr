@@ -38,6 +38,7 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--max-audio-s", type=float, default=120.0, help="clip audio (VRAM)")
     ap.add_argument("--max-len", type=int, default=4096)
+    ap.add_argument("--summary-frac", type=float, default=0.0, help="fraction of steps trained on notes-summarization (multi-task)")
     ap.add_argument("--out", default="models/moss_ft_zhtw")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--seed", type=int, default=0)
@@ -86,11 +87,20 @@ def main() -> int:
             g = gcd(sr, tgt_sr)
             wav = resample_poly(wav, tgt_sr // g, sr // g).astype(np.float32)
 
+        # multi-task mix: transcription (default) vs grounded notes-summarization
+        task_rng = random.Random(step * 7919 + args.seed)
+        do_summary = args.summary_frac > 0 and task_rng.random() < args.summary_frac
+        if do_summary:
+            from distil_vibevoice.data.summary_targets import build_notes
+            instruction = "請為這段會議音訊整理結構化筆記（主題、重點、待辦），數字與日期必須逐字引用。"
+            assistant = build_notes(segs)
+        else:
+            instruction = DEFAULT_PROMPT
+            assistant = target_text(segs)
         messages = [{"role": "user", "content": [
             {"type": "audio", "audio": rec["audio_path"]},
-            {"type": "text", "text": DEFAULT_PROMPT}]}]
+            {"type": "text", "text": instruction}]}]
         prompt_text = proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        assistant = target_text(segs)
         full_text = prompt_text + assistant + proc.tokenizer.eos_token
 
         enc = proc(text=full_text, audio=[wav], max_length=args.max_len, return_tensors="pt")
