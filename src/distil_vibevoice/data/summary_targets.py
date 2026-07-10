@@ -48,6 +48,18 @@ def build_notes(segments: list) -> str:
     def txt(s):
         return s["text"] if isinstance(s, dict) else s.text
 
+    # Deduplicate by structural signature (drop speaker prefix, digits, and
+    # non-CJK/latin punctuation): templated dialogue reuses sentence skeletons,
+    # and repetitive targets teach a small model to loop under greedy decoding.
+    seen_sig: set[str] = set()
+
+    def _fresh(line: str) -> bool:
+        sig = re.sub(r"[\d\s]", "", re.sub(r"^[^:：]*[:：]", "", line))[:24]
+        if sig in seen_sig:
+            return False
+        seen_sig.add(sig)
+        return True
+
     topics: list[str] = []
     keypoints: list[str] = []
     actions: list[str] = []
@@ -56,11 +68,11 @@ def build_notes(segments: list) -> str:
         if not t or t.startswith("["):
             continue
         low = t.lower()
-        if any(c in t for c in _TOPIC_CUES) and len(topics) < 3:
+        if any(c in t for c in _TOPIC_CUES) and len(topics) < 3 and _fresh(t):
             topics.append(t)
-        if any(c in t or c in low for c in _ACTION_CUES):
+        elif any(c in t or c in low for c in _ACTION_CUES) and _fresh(t):
             actions.append(f"{spk(s)}: {t}")
-        elif salient_facts(t):  # fact-bearing line -> keypoint, quoted verbatim
+        elif salient_facts(t) and _fresh(t):  # fact line -> keypoint, verbatim
             keypoints.append(f"{spk(s)}: {t}")
 
     lines: list[str] = []

@@ -38,6 +38,7 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--max-audio-s", type=float, default=120.0, help="clip audio (VRAM)")
     ap.add_argument("--max-len", type=int, default=4096)
+    ap.add_argument("--title-frac", type=float, default=0.0, help="fraction of steps trained on title generation")
     ap.add_argument("--summary-frac", type=float, default=0.0, help="fraction of steps trained on notes-summarization (multi-task)")
     ap.add_argument("--out", default="models/moss_ft_zhtw")
     ap.add_argument("--device", default="cuda:0")
@@ -87,10 +88,27 @@ def main() -> int:
             g = gcd(sr, tgt_sr)
             wav = resample_poly(wav, tgt_sr // g, sr // g).astype(np.float32)
 
-        # multi-task mix: transcription (default) vs grounded notes-summarization
+        # multi-task mix: transcription (default) / notes-summary / title
         task_rng = random.Random(step * 7919 + args.seed)
-        do_summary = args.summary_frac > 0 and task_rng.random() < args.summary_frac
-        if do_summary:
+        r = task_rng.random()
+        do_title = args.title_frac > 0 and r < args.title_frac
+        do_summary = (not do_title) and args.summary_frac > 0 and \
+            r < args.title_frac + args.summary_frac
+        if do_title:
+            from distil_vibevoice.data.summary_targets import build_title
+            from distil_vibevoice.data.dialogue_scripts import _DOMAIN_ZH, _DOMAIN_TOPICS
+            dom = rec.get("meta", {}).get("domain", "")
+            dom_zh = _DOMAIN_ZH.get(dom, "會議")
+            # recover the exact topic: it is one of the domain's known topics and
+            # appears verbatim somewhere in the transcript.
+            full_txt = " ".join(s["text"] for s in segs)
+            topic = rec.get("meta", {}).get("topic", "")
+            if not topic:
+                cands = [tp for tp in _DOMAIN_TOPICS.get(dom, []) if tp in full_txt]
+                topic = max(cands, key=len) if cands else (_DOMAIN_TOPICS.get(dom, [""])[0])
+            instruction = "請用一句話為這段會議產生標題，格式為「會議類型：主題」。"
+            assistant = build_title(dom_zh, topic)
+        elif do_summary:
             from distil_vibevoice.data.summary_targets import build_notes
             instruction = "請為這段會議音訊整理結構化筆記（主題、重點、待辦），數字與日期必須逐字引用。"
             assistant = build_notes(segs)
