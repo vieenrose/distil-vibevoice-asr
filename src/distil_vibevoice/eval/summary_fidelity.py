@@ -21,6 +21,18 @@ _DATE = re.compile(r"\d{1,2}/\d{1,2}|週[一二三四五六日]|[一二三四五
 # plain numbers, excluding speaker-label digits ("0:", "S01") — not facts
 _NUMBER = re.compile(r"(?<![A-Za-z\d])\d+(?:\.\d+)?(?!:)")
 
+# transcript-style markup that is NOT summary content and must not count as
+# facts: bracketed timestamps like [12.34] and [12.34][45.67], and [Sxx] tags.
+_TIMESTAMP_MARKUP = re.compile(r"\[\s*\d+(?:\.\d+)?\s*\]")
+_SPEAKER_MARKUP = re.compile(r"\[S\d+\]|\bS\d+\s*[:：]")
+
+
+def _strip_markup(text: str) -> str:
+    """Remove transcript timestamp/speaker markup before fact extraction."""
+    text = _TIMESTAMP_MARKUP.sub(" ", text)
+    text = _SPEAKER_MARKUP.sub(" ", text)
+    return text
+
 
 @dataclass
 class FidelityReport:
@@ -32,7 +44,12 @@ class FidelityReport:
 
 
 def extract_facts(text: str) -> set[str]:
-    """All checkable facts in a text (percentages, amounts, dates, numbers)."""
+    """All checkable facts in a text (percentages, amounts, dates, numbers).
+
+    Transcript timestamp/speaker markup is stripped first so a transcript-style
+    output isn't scored as if every timestamp were a hallucinated fact.
+    """
+    text = _strip_markup(text)
     facts: set[str] = set()
     for pat in (_PCT, _AMOUNT, _DATE):
         facts.update(m.group(0).replace(" ", "") for m in pat.finditer(text))

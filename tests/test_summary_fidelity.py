@@ -61,3 +61,21 @@ def test_merge_dedups_and_structures():
     # merged summary is faithful to the union of its notes
     r = check_fidelity(n1 + "\n" + n2, merged)
     assert r.hallucination_rate == 0.0
+
+
+def test_timestamp_markup_not_counted_as_facts():
+    from distil_vibevoice.eval.summary_fidelity import extract_facts
+    # transcript-style output: timestamps must not become "facts"
+    ts_text = "[0.00][S01]設備採購完成 75%[10.17][11.58][S02]預算 21 萬[22.98]"
+    facts = extract_facts(ts_text)
+    assert "0.00" not in facts and "10.17" not in facts and "22.98" not in facts
+    assert "75%" in facts and "21萬" in facts  # real facts survive
+
+
+def test_transcript_style_output_is_faithful_to_itself():
+    from distil_vibevoice.eval.summary_fidelity import check_fidelity
+    transcript = "設備採購完成 75%，預算 21 萬。"
+    # model (wrongly) emits transcript style, but content matches -> not hallucinated
+    hyp = "[0.00][S01]設備採購完成 75%[5.0][5.2][S02]預算 21 萬[10.0]"
+    r = check_fidelity(transcript, hyp)
+    assert r.hallucination_rate == 0.0
