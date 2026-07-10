@@ -27,7 +27,7 @@ runs/
 *.onnx
 
 # Data (managed outside git; manifests under data/manifests may be re-generated)
-data/
+/data/
 !data/manifests/.gitkeep
 
 # Audio scratch
