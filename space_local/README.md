@@ -8,7 +8,7 @@ pinned: false
 license: apache-2.0
 models:
   - Luigi/moss-transcribe-diarize-zhtw
-short_description: Private on-device zh-TW/en speech-to-text in your browser
+short_description: Meetings to transcripts with speakers — 100% in your browser
 ---
 
 # zh-TW / English transcription — fully in your browser
@@ -26,7 +26,7 @@ both). The identical exported graphs power the
 [sherpa-onnx C++ port](https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize)
 for phone deployment.
 
-For hour-long meetings, use the
-[ZeroGPU Space](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber-live)
-(chunked windows + cross-window speaker linking) or the
-[instant results viewer](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber).
+Bundled examples: real Taiwan Legislative Yuan meetings (立法院 IVOD open
+data, CC-BY-4.0) including a full 2-hour committee session with precomputed
+results — instant synchronized playback, plus you can re-run the pipeline
+locally on your own audio of any length.

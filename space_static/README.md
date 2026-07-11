@@ -26,7 +26,7 @@ clustering pass (validated on real meetings: DER 0.056 on a 30-min session,
 speaker consistency 0.912 on a 123-min session).
 
 The results shown were precomputed with exactly that pipeline. To run it live on your own
-audio, use the [live ZeroGPU Space](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber-live)
+audio, use the [fully-local browser demo](https://huggingface.co/spaces/Luigi/zh-tw-transcriber-local)
 or the Python snippet on the
 [model card](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw#usage).
 

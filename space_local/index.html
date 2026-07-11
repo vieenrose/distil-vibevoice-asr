@@ -3,106 +3,221 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zh-TW Transcriber — 100% in your browser</title>
+<title>zh-TW 會議逐字稿 — 100% 本機運算</title>
 <style>
   :root {
-    --bg:#fff; --fg:#1a1a1a; --muted:#767676; --card:#f5f5f7;
-    --accent:#4f46e5; --border:#e2e2e6; --ok:#2aa876; --warn:#c78c2c;
+    --bg:#f7f7f9; --fg:#17171c; --muted:#71717a; --card:#ffffff;
+    --accent:#4f46e5; --accent2:#7c3aed; --border:#e4e4ea; --ok:#16a34a;
+    --active:#fef3c7; --chip:#eef2ff; --danger:#dc2626;
+    --shadow:0 1px 3px rgba(0,0,0,.07);
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#101014; --fg:#e8e8ea; --muted:#9a9aa2; --card:#1a1a22; --border:#2a2a33; }
+    :root {
+      --bg:#0e0e12; --fg:#ececf1; --muted:#9c9ca7; --card:#17171e;
+      --border:#26262f; --active:#3b3413; --chip:#1e1b36;
+      --shadow:0 1px 3px rgba(0,0,0,.4);
+    }
   }
   * { box-sizing:border-box; }
-  body { margin:0; font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+  html, body { margin:0; }
+  body { font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
          background:var(--bg); color:var(--fg); line-height:1.55; }
-  .wrap { max-width:860px; margin:0 auto; padding:20px 16px 60px; }
-  h1 { font-size:1.4rem; margin:.2em 0; }
-  .sub { color:var(--muted); font-size:.93rem; }
-  a { color:var(--accent); }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:12px;
-          padding:14px 16px; margin:14px 0; }
-  button { background:var(--accent); color:#fff; border:none; border-radius:9px;
-           padding:10px 18px; font-size:1rem; cursor:pointer; margin-right:8px; }
-  button:disabled { opacity:.45; cursor:default; }
-  button.rec { background:#e05563; }
-  progress { width:100%; height:8px; }
-  #status { font-size:.9rem; color:var(--muted); margin:6px 0; min-height:1.2em; }
-  #stats  { font-size:.9rem; color:var(--ok); margin:6px 0; }
-  #transcript { border:1px solid var(--border); border-radius:12px; background:var(--card);
-                min-height:120px; max-height:50vh; overflow-y:auto; padding:10px 14px; }
-  .seg { padding:4px 6px; }
-  .seg .ts { color:var(--muted); font-size:.8rem; margin-right:8px; font-variant-numeric:tabular-nums; }
+  .wrap { max-width:880px; margin:0 auto; padding:24px 16px 70px; }
+
+  header h1 { font-size:1.45rem; margin:0 0 4px; letter-spacing:-.01em; }
+  header .tag { display:inline-block; font-size:.78rem; font-weight:600;
+    color:var(--ok); border:1px solid var(--ok); border-radius:999px;
+    padding:1px 10px; margin-left:8px; vertical-align:3px; }
+  header p { color:var(--muted); font-size:.93rem; margin:6px 0 0; }
+  header a { color:var(--accent); text-decoration:none; }
+
+  .card { background:var(--card); border:1px solid var(--border);
+          border-radius:14px; padding:16px 18px; margin:16px 0;
+          box-shadow:var(--shadow); }
+  .card h2 { font-size:.82rem; text-transform:uppercase; letter-spacing:.06em;
+             color:var(--muted); margin:0 0 10px; }
+
+  /* model status strip */
+  #model-strip { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #model-state { font-size:.9rem; }
+  #model-state .dot { display:inline-block; width:9px; height:9px;
+    border-radius:50%; background:var(--muted); margin-right:6px; }
+  #model-state.ready .dot { background:var(--ok); }
+  #model-state.loading .dot { background:#eab308; animation:pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  #quality { font-size:.85rem; color:var(--muted); }
+  #dl-bars { width:100%; }
+  #dl-bars > div { display:flex; align-items:center; gap:8px;
+    font-size:.8rem; color:var(--muted); margin:3px 0; }
+  #dl-bars progress { flex:1; height:6px; accent-color:var(--accent); }
+
+  /* input zone */
+  #drop { border:2px dashed var(--border); border-radius:12px; padding:22px;
+    text-align:center; color:var(--muted); cursor:pointer;
+    transition:border-color .15s, background .15s; }
+  #drop.hover { border-color:var(--accent); background:var(--chip); }
+  #drop b { color:var(--fg); }
+  .inrow { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; align-items:center; }
+  button { border:none; border-radius:10px; padding:10px 18px; font-size:.95rem;
+    cursor:pointer; background:var(--accent); color:#fff; font-weight:500; }
+  button:disabled { opacity:.4; cursor:default; }
+  button.ghost { background:var(--chip); color:var(--accent); }
+  button.danger { background:var(--danger); }
+  button.rec-on { background:var(--danger); animation:pulse 1.2s infinite; }
+
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .chip { background:var(--chip); border:1px solid var(--border);
+    border-radius:10px; padding:8px 12px; font-size:.85rem; cursor:pointer;
+    max-width:400px; text-align:left; color:var(--fg); }
+  .chip:hover { border-color:var(--accent); }
+  .chip small { display:block; color:var(--muted); }
+
+  /* result */
+  #player-box { margin:0 0 8px; }
+  audio { width:100%; height:38px; }
+  #statusline { display:flex; gap:12px; align-items:baseline; flex-wrap:wrap;
+    font-size:.88rem; margin:8px 0; }
+  #status { color:var(--muted); }
+  #stats { color:var(--ok); font-weight:500; }
+  #bar { width:100%; height:5px; background:var(--border); border-radius:99px;
+    overflow:hidden; display:none; margin:2px 0 8px; }
+  #bar > div { height:100%; width:0%; border-radius:99px;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));
+    transition:width .5s; }
+  .tools { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  #search { flex:1; min-width:180px; padding:8px 12px; border-radius:9px;
+    border:1px solid var(--border); background:var(--card); color:var(--fg); }
+  .tools label { font-size:.83rem; color:var(--muted); user-select:none; }
+  .tools a { font-size:.88rem; color:var(--accent); text-decoration:none; }
+  #legend { display:flex; gap:6px 10px; flex-wrap:wrap; font-size:.82rem; margin:8px 0; }
+  .lg { cursor:pointer; padding:2px 9px; border-radius:999px;
+    background:var(--chip); border:1px solid var(--border); }
+  .lg.off { opacity:.35; }
+  .lg i { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; }
+
+  #transcript { border:1px solid var(--border); border-radius:12px;
+    background:var(--card); min-height:140px; max-height:56vh;
+    overflow-y:auto; padding:8px 12px; }
+  .seg { padding:5px 8px; border-radius:8px; cursor:pointer; }
+  .seg:hover { background:var(--chip); }
+  .seg.active { background:var(--active); }
+  .seg.hidden { display:none; }
+  .seg .ts { color:var(--muted); font-size:.78rem; margin-right:8px;
+    font-variant-numeric:tabular-nums; }
   .seg .spk { font-weight:700; margin-right:8px; }
-  .raw { color:var(--muted); font-size:.9rem; white-space:pre-wrap; word-break:break-all; }
+  .seg.live { opacity:.75; }
+  .tail { color:var(--muted); font-size:.9rem; padding:5px 8px;
+    white-space:pre-wrap; word-break:break-all; }
+  .tail::after { content:"▍"; animation:pulse .8s infinite; color:var(--accent); }
+  .placeholder { color:var(--muted); font-size:.9rem; padding:18px;
+    text-align:center; }
+
+  details { margin:16px 0; color:var(--muted); font-size:.9rem; }
+  details summary { cursor:pointer; color:var(--fg); font-weight:500; }
+  details table { border-collapse:collapse; margin:10px 0; }
+  details td, details th { border:1px solid var(--border); padding:4px 10px;
+    font-size:.84rem; }
   footer { color:var(--muted); font-size:.8rem; margin-top:24px; }
-  table { border-collapse:collapse; font-size:.85rem; }
-  td,th { border:1px solid var(--border); padding:3px 9px; }
+  footer a { color:var(--accent); }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>🔒 zh-TW / English speech-to-text — 100% local, in your browser</h1>
-  <p class="sub">
-    <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw">Luigi/moss-transcribe-diarize-zhtw</a>
-    (0.9B, q4/int8 ONNX) running entirely on <b>your</b> device via
-    <a href="https://onnxruntime.ai/docs/tutorials/web/">onnxruntime-web</a>.
-    No audio ever leaves this page — close the tab, it's gone. Record a clip or drop a meeting file of any length: it is transcribed in windows, every segment is voice-fingerprinted (ECAPA), and one global clustering pass keeps speaker labels consistent across the whole meeting — the same pipeline as the server demos, entirely on your device. In a hurry? The
-    <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber-live">ZeroGPU Space</a>
-    does the same job on a server GPU, and the
-    <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber">viewer</a> has
-    precomputed 2-hour examples.
-  </p>
+  <header>
+    <h1>🎙️ zh-TW 會議逐字稿<span class="tag">100% 本機 · 零上傳</span></h1>
+    <p>
+      Speaker-attributed, timestamped transcription for Traditional-Chinese /
+      English meetings — the
+      <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw">0.9B model</a>
+      runs <b>entirely in your browser</b> (WebGPU / wasm). Your audio never
+      leaves your device. Try the real 2-hour parliament meeting below
+      (instant, precomputed) or transcribe your own recording of any length.
+    </p>
+  </header>
 
-  <div class="card" id="loader">
-    <b>1 · Load the model</b> — one-time download, cached by your browser.
-    <div style="margin:6px 0">
-      <label><input type="radio" name="quality" value="int8" checked>
-        <b>High accuracy</b> (int8 decoder, ~1.15 GB, MER 0.027–0.042 vs bf16)</label><br>
-      <label><input type="radio" name="quality" value="q4">
-        Compact (q4 decoder, ~0.93 GB, ~1.7× faster decode, MER 0.068)</label>
+  <div class="card">
+    <h2>Model</h2>
+    <div id="model-strip">
+      <span id="model-state"><span class="dot"></span><span id="model-msg">Not loaded — starts automatically when needed</span></span>
+      <span id="quality">
+        <label><input type="radio" name="quality" value="int8" checked> high accuracy (~1.15 GB)</label>
+        <label style="margin-left:10px"><input type="radio" name="quality" value="q4"> compact (~0.93 GB)</label>
+      </span>
+      <button id="btn-load" class="ghost">Load now</button>
     </div>
-    <div id="ep-note" class="sub"></div>
-    <p><button id="btn-load">Download &amp; initialize</button></p>
     <div id="dl-bars"></div>
   </div>
 
   <div class="card">
-    <b>2 · Provide audio</b> — mic (≤ 2 min) or a meeting file of ANY length
-    <p>
-      <button id="btn-rec" disabled>● Record</button>
-      <input type="file" id="file-in" accept="audio/*" disabled>
-      <button id="btn-abort" style="display:none;background:#e05563">✕ Stop processing</button>
-    </p>
-    <div id="status">Model not loaded yet.</div>
+    <h2>Audio</h2>
+    <div id="drop">
+      <b>Drop a meeting recording here</b> or click to choose a file<br>
+      <small>any length · mp3 / wav / m4a / … · processed locally, window by window</small>
+      <input type="file" id="file-in" accept="audio/*" hidden>
+    </div>
+    <div class="inrow">
+      <button id="btn-rec">● Record mic</button>
+      <button id="btn-abort" class="danger" style="display:none">✕ Stop processing</button>
+      <span id="input-note" style="font-size:.83rem;color:var(--muted)"></span>
+    </div>
+    <div class="chips" id="examples">
+      <button class="chip" data-ex="ivod_2024_15857">
+        📄 交通委員會全體委員會議 <small>真實立法院會議 · 2 hr 3 min · 35 位講者 · 即看（預先計算）</small>
+      </button>
+      <button class="chip" data-ex="ivod_2024_15362">
+        📄 全院委員談話會 <small>真實立法院會議 · 5 min · 3 位講者 · 即看（預先計算）</small>
+      </button>
+    </div>
   </div>
 
   <div class="card">
-    <b>3 · Transcript</b> <a id="dl-srt" style="display:none;margin-left:10px">⬇ SRT</a>
-    <div id="stats"></div>
-    <div id="transcript"><span class="sub">—</span></div>
+    <h2>Transcript</h2>
+    <div id="player-box" style="display:none"><audio id="audio" controls preload="none"></audio></div>
+    <div id="statusline"><span id="status">Pick an example or provide audio.</span><span id="stats"></span></div>
+    <div id="bar"><div></div></div>
+    <div class="tools">
+      <input id="search" type="search" placeholder="搜尋逐字稿 / search…">
+      <label><input type="checkbox" id="autoscroll" checked> auto-scroll</label>
+      <a id="dl-srt" style="display:none" download="transcript.srt">⬇ SRT</a>
+      <a id="dl-json" style="display:none" download="transcript.json">⬇ JSON</a>
+    </div>
+    <div id="legend"></div>
+    <div id="transcript"><div class="placeholder">尚無內容 — 選一個範例，或拖入你的錄音。</div></div>
   </div>
 
-  <div class="card sub">
-    <b>Accuracy &amp; speed</b> — measured against the full bf16 fine-tune on held-out
-    real meeting audio: <b>MER 0.027–0.042 (int8 decoder)</b> / 0.068 (q4), with the
-    same OpenCC s2tw output normalization as the reference pipeline. Accuracy and
-    privacy are the point of running locally — pick q4 only if download size matters.
-    Reference decode speeds: 8–25 tok/s CPU (a 30 s clip ≈ 5–15 s of compute;
-    an hour of meeting audio can take from tens of minutes up to a few hours of
-    browser compute depending on your hardware — the transcript streams as it
-    goes and can be stopped at any time, keeping partial results).
-    Speaker linking: segments ≥ 3 s cluster at cosine 0.45 (average linkage),
-    shorter ones snap to the nearest centroid — validated on real meetings
-    (DER 0.056 / 30 min, consistency 0.912 / 123 min vs pyannote).
-    <br>The same exported graphs power the
-    <a href="https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize">sherpa-onnx C++ port</a>
-    for phones.
-  </div>
+  <details>
+    <summary>How it works · accuracy</summary>
+    <p>
+      Audio is transcribed in 5-minute windows by a 0.9B model (Whisper-Medium
+      encoder + Qwen3-0.6B decoder, fine-tuned for zh-TW meetings). Every
+      segment gets an <a href="https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb">ECAPA-TDNN</a>
+      voice fingerprint, and one global clustering pass links speakers across
+      windows — S01 at minute 3 is the same voice as S01 at minute 130.
+      Everything (model, audio, results) stays in this tab.
+    </p>
+    <table>
+      <tr><th></th><th>vs bf16 fine-tune (MER)</th><th>download</th></tr>
+      <tr><td>int8 decoder (default)</td><td><b>0.027–0.042</b></td><td>~1.15 GB</td></tr>
+      <tr><td>q4 decoder</td><td>0.068</td><td>~0.93 GB</td></tr>
+    </table>
+    <p>
+      Pipeline validated on real meetings vs pyannote references: DER 0.056 on a
+      30-min session, speaker consistency 0.912 on a 123-min session.
+      Speed depends on your hardware (WebGPU is used when available): a 30 s clip
+      is seconds; an hour of audio can take tens of minutes to hours of browser
+      compute. The transcript streams while it works and you can stop anytime,
+      keeping partial results. The same ONNX graphs power a
+      <a href="https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize">sherpa-onnx C++ port</a>
+      for phones.
+    </p>
+  </details>
 
   <footer>
-    Apache-2.0. Model: fine-tune of
-    <a href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS MOSS-Transcribe-Diarize</a>.
-    Transcripts are machine-generated and may contain errors.
+    Example audio: 立法院 IVOD (Taiwan Legislative Yuan) open data,
+    <b>CC-BY-4.0</b>, via <a href="https://huggingface.co/datasets/openfun/tw-ly-ivod">openfun/tw-ly-ivod</a>.
+    Model: Apache-2.0 fine-tune of
+    <a href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">MOSS-Transcribe-Diarize</a>.
+    Machine-generated transcripts may contain errors.
   </footer>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
