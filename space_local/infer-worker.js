@@ -38,17 +38,13 @@ async function ensureModel(quality) {
   ort.env.wasm.numThreads = self.crossOriginIsolated
     ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
   ort.env.wasm.proxy = false;  // we ARE the worker
-  const mobile = quality === "mobile";
-  const M = mobile ? REPO + "mobile/" : WEIGHTS;
-  const models = mobile ? {
-    encoder: M + "encoder.q4.onnx",
-    embedding: WEIGHTS + "embedding.int8.onnx",
-    decoder: M + "decoder.q4.onnx",   // fp16 KV
-    ecapa: WEIGHTS + "ecapa.onnx",
-  } : {
+  // default: QAT q4 + fp16-KV decoder (int8-quality at q4 size, half the KV
+  // memory). 'accuracy' keeps the int8 decoder (fp32 KV) for max fidelity.
+  const accuracy = quality === "int8";
+  const models = {
     encoder: WEIGHTS + "encoder.int8.onnx",
     embedding: WEIGHTS + "embedding.int8.onnx",
-    decoder: WEIGHTS + (quality === "q4" ? "decoder.q4.onnx" : "decoder.int8.onnx"),
+    decoder: accuracy ? WEIGHTS + "decoder.int8.onnx" : WEIGHTS + "decoder.qat.onnx",
     ecapa: WEIGHTS + "ecapa.onnx",
   };
   const [cfg, melBin, vocab] = await Promise.all([
@@ -57,7 +53,7 @@ async function ensureModel(quality) {
     fetch("models/vocab.json").then((r) => r.json()),
   ]);
   const p = new MossPipeline(ort, cfg, melBin, vocab);
-  if (mobile) p.kvDtype = "float16";
+  if (!accuracy) p.kvDtype = "float16";  // qat decoder has fp16 KV I/O
   p.eps = ["wasm"];
   await p.load(models, fetchProgress,
     (name, done, total) => post("dl", { name, done, total }));

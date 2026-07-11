@@ -18,11 +18,10 @@ const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
 
 // iOS Safari caps tab memory ~1.3-1.5GB; the mobile model set (q4 + fp16 KV)
 // plus a shorter window fits. Detect and default accordingly.
-const IS_IOS = /iP(hone|ad|od)/.test(navigator.platform) ||
-  (navigator.userAgent.includes("Mac") && "ontouchend" in document) ||
-  /iPhone|iPad/.test(navigator.userAgent);
-const LOW_MEM = (navigator.deviceMemory && navigator.deviceMemory <= 4) || IS_IOS;
-const WINDOW_S = LOW_MEM ? 90 : 180;
+// 90 s windows everywhere: bounds the KV cache so decode never crawls on a
+// window's tail (the "hangs mid-window" symptom of longer windows), and links
+// speakers more often for steadier streaming. Validated DER ~= 300 s.
+const WINDOW_S = 90;
 let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
 let _s2tw = (t) => t;
@@ -32,14 +31,8 @@ try {
 // written-form post-processing: Traditional script (s2tw) then number ITN
 const s2tw = (t) => itn(_s2tw(t));
 
-$("input-note").textContent = LOW_MEM
-  ? "CPU-only · phone mode (q4 + fp16 KV, 1.5-min windows to fit Safari memory)"
-  : "CPU-only · runs in a background worker (page stays responsive)";
-// preselect the phone-friendly model on memory-limited devices
-if (LOW_MEM) {
-  const r = document.querySelector('input[name="quality"][value="mobile"]');
-  if (r) r.checked = true;
-}
+$("input-note").textContent =
+  "CPU-only · runs in a background worker · 1.5-min windows";
 
 /* ============================ inference worker ============================ */
 let worker = null, workerReady = false, onWorkerMsg = null;
@@ -51,7 +44,10 @@ function getWorker() {
     if (m.type === "dl") {
       const pg = $(`pg-${m.name}`);
       if (pg && m.total) pg.value = (100 * m.done) / m.total;
-      dlState = { done: m.done, total: m.total };
+      dlAgg[m.name] = { done: m.done, total: m.total };
+      const done = Object.values(dlAgg).reduce((a, x) => a + x.done, 0);
+      const total = Object.values(dlAgg).reduce((a, x) => a + (x.total || 0), 0);
+      dlState = { done, total, files: Object.keys(dlAgg).length };
       beat("downloading model");
     } else if (m.type === "ready") {
       dlState = null;
@@ -311,7 +307,8 @@ $("btn-abort").onclick = () => { aborted = true; if (worker) worker.postMessage(
 
 /* ---- liveness heartbeat: time since the model last made progress ------- */
 let lastBeat = 0, beatWhat = "", runT0 = 0, hbTimer = null;
-let dlState = null;  // {done,total} while a model file downloads
+let dlState = null;  // aggregate download state
+let dlAgg = {};
 function beat(what) { lastBeat = Date.now(); beatWhat = what; }
 function hbStart() {
   runT0 = Date.now();
@@ -324,9 +321,10 @@ function hbStart() {
     let note;
     if (dlState) {
       dot.className = "";
-      const pct = dlState.total ? ` ${(100 * dlState.done / dlState.total).toFixed(0)}%` : "";
+      const mb = (dlState.done / 1048576).toFixed(0);
+      const tot = dlState.total ? ` / ${(dlState.total / 1048576).toFixed(0)} MB` : " MB";
       $("hb-text").textContent =
-        `${fmt(el)} elapsed · downloading model${pct} (one-time, cached)`;
+        `${fmt(el)} elapsed · downloading model ${mb}${tot} (one-time, cached)`;
       return;
     }
     if (idle < 8) { dot.className = ""; note = "model active"; }
