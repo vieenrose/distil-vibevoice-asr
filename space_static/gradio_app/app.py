@@ -354,6 +354,9 @@ speakers across windows — so a 2+ hour meeting gets one consistent set of spea
 The long example below is a real Taiwan Legislative Yuan meeting
 (立法院 IVOD open data, CC-BY-4.0) with **precomputed results** — click it to see the
 full-meeting output instantly. Upload your own audio to run the pipeline live on ZeroGPU.
+Prefer a zero-quota browsing experience? The
+[static viewer Space](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber) has the
+same precomputed meetings with click-to-seek playback.
 """
 
 FOOTER = """

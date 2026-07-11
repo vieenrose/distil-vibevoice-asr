@@ -25,9 +25,9 @@ speakers across windows with ECAPA-TDNN embeddings + one global agglomerative
 clustering pass (validated on real meetings: DER 0.056 on a 30-min session,
 speaker consistency 0.912 on a 123-min session).
 
-The results shown were precomputed with exactly that pipeline. To run it live
-on your own audio, see `gradio_app/` in this repo (a ready Gradio/ZeroGPU app —
-duplicate onto GPU hardware) or the Python snippet on the
+The results shown were precomputed with exactly that pipeline. To run it live on your own
+audio, use the [live ZeroGPU Space](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber-live)
+or the Python snippet on the
 [model card](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw#usage).
 
 Example audio: 立法院 IVOD open data, **CC-BY-4.0**, via
