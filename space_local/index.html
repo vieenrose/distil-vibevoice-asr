@@ -54,7 +54,13 @@
   </p>
 
   <div class="card" id="loader">
-    <b>1 · Load the model</b> — ~920 MB one-time download, cached by your browser.
+    <b>1 · Load the model</b> — one-time download, cached by your browser.
+    <div style="margin:6px 0">
+      <label><input type="radio" name="quality" value="int8" checked>
+        <b>High accuracy</b> (int8 decoder, ~1.15 GB, MER 0.027–0.042 vs bf16)</label><br>
+      <label><input type="radio" name="quality" value="q4">
+        Compact (q4 decoder, ~0.93 GB, ~1.7× faster decode, MER 0.068)</label>
+    </div>
     <div id="ep-note" class="sub"></div>
     <p><button id="btn-load">Download &amp; initialize</button></p>
     <div id="dl-bars"></div>
@@ -77,9 +83,10 @@
   </div>
 
   <div class="card sub">
-    <b>Accuracy &amp; speed</b> — the q4/int8 graphs measure <b>MER 0.068 vs the full
-    bf16 fine-tune</b> on held-out real meeting audio (Traditional-Chinese output is
-    enforced by the same OpenCC s2tw step the reference pipeline uses).
+    <b>Accuracy &amp; speed</b> — measured against the full bf16 fine-tune on held-out
+    real meeting audio: <b>MER 0.027–0.042 (int8 decoder)</b> / 0.068 (q4), with the
+    same OpenCC s2tw output normalization as the reference pipeline. Accuracy and
+    privacy are the point of running locally — pick q4 only if download size matters.
     Reference decode speeds: 8–25 tok/s CPU (a 30 s clip ≈ 5–15 s of compute;
     an hour of meeting audio can take from tens of minutes up to a few hours of
     browser compute depending on your hardware — the transcript streams as it

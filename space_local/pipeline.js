@@ -342,8 +342,15 @@ const SEG_RE =
   /\[(\d{1,7}(?:\.\d{1,3})?)\](?:\[(S\d{1,3})\])?([^\[\]]+?)\[(\d{1,7}(?:\.\d{1,3})?)\]/g;
 
 export function parseLenient(text) {
+  return parseLenientWithTail(text).segs;
+}
+
+/* Also returns the raw text AFTER the last complete segment — the sentence
+ * currently being generated — so streaming UIs can show it live. */
+export function parseLenientWithTail(text) {
   const segs = [];
   let prev = "S01";
+  let tailFrom = 0;
   SEG_RE.lastIndex = 0;
   let m;
   while ((m = SEG_RE.exec(text)) !== null) {
@@ -354,8 +361,12 @@ export function parseLenient(text) {
       segs.push({ start, end, speaker: spk, text: body });
       prev = spk;
     }
+    tailFrom = SEG_RE.lastIndex;
   }
-  return segs;
+  // strip a leading timestamp/speaker marker from the in-progress tail
+  const tail = text.slice(tailFrom)
+    .replace(/^\s*(\[\d{1,7}(?:\.\d{1,3})?\])?(\[S\d{1,3}\])?/, "");
+  return { segs, tail };
 }
 
 /* ---- GPT-2 byte-level decoder -------------------------------------------- */

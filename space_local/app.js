@@ -1,14 +1,17 @@
 /* UI + audio capture for the fully-local zh-TW meeting transcriber. */
-import { MossPipeline, parseLenient, linkSpeakers } from "./pipeline.js";
+import { MossPipeline, parseLenientWithTail } from "./pipeline.js";
 
 const ort = window.ort;
 const $ = (id) => document.getElementById(id);
-const MODELS = {
-  encoder: "models/encoder.int8.onnx",
-  embedding: "models/embedding.int8.onnx",
-  decoder: "models/decoder.q4.onnx",
-  ecapa: "models/ecapa.onnx",
-};
+function modelSet(quality) {
+  return {
+    encoder: "models/encoder.int8.onnx",
+    embedding: "models/embedding.int8.onnx",
+    decoder: quality === "q4" ? "models/decoder.q4.onnx"
+                              : "models/decoder.int8.onnx",
+    ecapa: "models/ecapa.onnx",
+  };
+}
 const MIC_MAX_S = 120;
 const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
                  "#3aa6b9", "#d0679d", "#7a9a01", "#b05c45", "#5c7285"];
@@ -48,6 +51,8 @@ async function fetchWithProgress(url, onProgress) {
 
 $("btn-load").onclick = async () => {
   $("btn-load").disabled = true;
+  const MODELS = modelSet(
+    document.querySelector('input[name="quality"]:checked')?.value || "int8");
   const bars = $("dl-bars");
   bars.innerHTML = Object.keys(MODELS).map((n) =>
     `<div>${n} <progress id="pg-${n}" max="100" value="0"></progress></div>`).join("");
@@ -140,9 +145,10 @@ function fmt(t) {
 
 function renderSegs(segs, tail = "") {
   const box = $("transcript");
-  const speakers = [...new Set(segs.map((s) => s.speaker))];
+  const speakers = [...new Set(segs.map((s) => s.speaker).filter((x) => x !== "…"))];
   const color = Object.fromEntries(
     speakers.map((s, i) => [s, PALETTE[i % PALETTE.length]]));
+  color["…"] = "var(--muted, #888)";
   box.innerHTML = segs.map((s) =>
     `<div class="seg"><span class="ts">${fmt(s.start)}–${fmt(s.end)}</span>` +
     `<span class="spk" style="color:${color[s.speaker]}">${s.speaker}</span>` +
@@ -187,16 +193,24 @@ async function transcribe(wav) {
   $("stats").textContent = "";
   $("transcript").innerHTML = '<span class="sub">…</span>';
   const t0 = Date.now();
+  let lastLinked = [];
   try {
     const segs = await pipe.transcribeMeeting(wav, {
       windowS: WINDOW_S,
       signal: abortCtl.signal,
       onToken: (wi, nw, text, n, dt) => {
+        const off = wi * WINDOW_S;
+        const { segs: prov, tail } = parseLenientWithTail(text);
+        const live = prov.map((s) => ({
+          start: s.start + off, end: s.end + off,
+          speaker: "…", text: s.text,
+        }));
+        renderSegs([...lastLinked, ...live], tail);
         $("status").textContent =
           `Window ${wi + 1}/${nw} · ${n} tokens · ${(n / dt).toFixed(1)} tok/s`;
-        if (wi === 0) renderSegs([], text); // stream raw text for the first window
       },
       onWindow: (linked, done, total) => {
+        lastLinked = linked;
         const nSpk = renderSegs(linked);
         const el = (Date.now() - t0) / 1000;
         const eta = (el / done) * (total - done);
