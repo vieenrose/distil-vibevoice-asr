@@ -129,7 +129,7 @@
       Speaker-attributed, timestamped transcription for Traditional-Chinese /
       English meetings — the
       <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw">0.9B model</a>
-      runs <b>entirely in your browser</b> (WebGPU / wasm). Your audio never
+      runs <b>entirely in your browser</b> on CPU. Your audio never
       leaves your device. Try the real 2-hour parliament meeting below
       (instant, precomputed) or transcribe your own recording of any length.
     </p>
@@ -220,8 +220,19 @@
     Machine-generated transcripts may contain errors.
   </footer>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
+<script>
+// cross-origin isolation via service worker -> multi-threaded wasm
+if ("serviceWorker" in navigator && !window.crossOriginIsolated) {
+  navigator.serviceWorker.register("coi-sw.js").then((reg) => {
+    if (reg.active && !sessionStorage.getItem("coi-reloaded")) {
+      sessionStorage.setItem("coi-reloaded", "1");
+      location.reload();
+    }
+  }).catch(() => {});
+}
+</script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

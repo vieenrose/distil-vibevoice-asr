@@ -48,6 +48,7 @@ class DecoderWrap(torch.nn.Module):
         self.lm = moss.model.language_model
         self.lm_head = moss.lm_head
         self.n_layers = moss.config.text_config.num_hidden_layers
+        self.last_logits = False
 
     def forward(self, inputs_embeds, attention_mask, *flat_past):
         from transformers.cache_utils import DynamicCache
@@ -58,7 +59,10 @@ class DecoderWrap(torch.nn.Module):
                 past.update(flat_past[2 * i], flat_past[2 * i + 1], i)
         out = self.lm(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
                       past_key_values=past, use_cache=True, return_dict=True)
-        logits = self.lm_head(out.last_hidden_state)
+        hidden = out.last_hidden_state
+        if self.last_logits:
+            hidden = hidden[:, -1:, :]
+        logits = self.lm_head(hidden)
         pkv = out.past_key_values
         present = []
         for i in range(self.n_layers):
@@ -71,6 +75,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="models/moss")
     ap.add_argument("--out", default="models/moss_onnx")
+    ap.add_argument("--last-logits", action="store_true",
+                    help="decoder emits logits for the LAST position only "
+                         "(saves a huge lm_head pass + a (S,vocab) tensor at "
+                         "prefill; required for 32-bit wasm where full-prefill "
+                         "logits are ~1.4 GB)")
     ap.add_argument("--parity-only", action="store_true")
     args = ap.parse_args()
     global OUT
@@ -90,6 +99,7 @@ def main() -> int:
 
     enc = EncoderWrap(moss).eval()
     dec = DecoderWrap(moss).eval()
+    dec.last_logits = bool(args.last_logits)
     emb = moss.model.language_model.embed_tokens
 
     mel = torch.randn(1, moss.config.audio_config.num_mel_bins, 3000)  # 30s window
@@ -114,7 +124,8 @@ def main() -> int:
         past = [torch.randn(1, n_kv, P, head_dim) for _ in range(2 * n_layers)]
         in_names = ["inputs_embeds", "attention_mask"] + [f"past_{t}_{i}" for i in range(n_layers) for t in ("k", "v")]
         out_names = ["logits"] + [f"present_{t}_{i}" for i in range(n_layers) for t in ("k", "v")]
-        dyn = {"inputs_embeds": {0: "B", 1: "S"}, "attention_mask": {0: "B", 1: "S_total"}, "logits": {0: "B", 1: "S"}}
+        dyn = {"inputs_embeds": {0: "B", 1: "S"}, "attention_mask": {0: "B", 1: "S_total"},
+               "logits": {0: "B"} if args.last_logits else {0: "B", 1: "S"}}
         for i in range(n_layers):
             for t in ("k", "v"):
                 dyn[f"past_{t}_{i}"] = {0: "B", 2: "P"}

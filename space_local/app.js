@@ -15,8 +15,7 @@ const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
                  "#8884d8", "#c05780", "#4a9d5f", "#b8860b", "#7b68ee",
                  "#20a4b5", "#cc6699", "#899a20"];
 
-const hasWebGPU = !!navigator.gpu;
-const WINDOW_S = hasWebGPU ? 300 : 180;
+const WINDOW_S = 180;  // CPU-only; 180 s windows validated (DER ~= 300 s)
 let pipe = null, loading = null, abortCtl = null, busy = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
 let s2tw = (t) => t;
@@ -24,9 +23,11 @@ try {
   if (window.OpenCC) s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
 } catch (e) { console.warn("opencc unavailable", e); }
 
-$("input-note").textContent = hasWebGPU
-  ? "WebGPU ✓ — decoding on your GPU"
-  : "No WebGPU — CPU fallback (slower)";
+const nThreads = window.crossOriginIsolated
+  ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+$("input-note").textContent =
+  `CPU-only · ${nThreads} thread${nThreads > 1 ? "s" : ""}` +
+  (nThreads === 1 ? " (multithreading unavailable in this browser)" : "");
 
 /* ============================ model loading ============================ */
 function modelSet(quality) {
@@ -81,8 +82,8 @@ function ensureModel() {
       fetch("models/vocab.json").then((r) => r.json()),
     ]);
     const p = new MossPipeline(ort, cfg, melBin, vocab);
-    p.eps = hasWebGPU ? ["webgpu", "wasm"] : ["wasm"];
-    ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+    p.eps = ["wasm"];
+    ort.env.wasm.numThreads = nThreads;
     await p.load(MODELS, fetchWithProgress, (name, done, total) => {
       const pg = $(`pg-${name}`);
       if (pg && total) pg.value = (100 * done) / total;
@@ -90,7 +91,7 @@ function ensureModel() {
     pipe = p;
     bars.innerHTML = "";
     setModelState("ready",
-      `Model ready · ${quality} · ${hasWebGPU ? "WebGPU" : "CPU"} · ${WINDOW_S / 60}-min windows`);
+      `Model ready · ${quality} · CPU ×${nThreads} · ${WINDOW_S / 60}-min windows`);
   })().catch((e) => {
     loading = null;
     setModelState("", "Load failed: " + e.message);
@@ -337,6 +338,12 @@ async function transcribe(wav) {
     const finalSegs = await pipe.transcribeMeeting(wav, {
       windowS: WINDOW_S,
       signal: abortCtl.signal,
+      onStage: (wi, nw, stage, detail) => {
+        const what = stage === "encode"
+          ? `listening to the audio (chunk ${detail})`
+          : `reading it into the model (${detail}) — first words follow`;
+        $("status").textContent = `Window ${wi + 1}/${nw} · ${what}…`;
+      },
       onToken: (wi, nw, text, n, dt) => {
         const off = wi * WINDOW_S;
         const { segs: prov, tail } = parseLenientWithTail(text);

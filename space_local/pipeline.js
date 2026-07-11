@@ -94,12 +94,15 @@ export class MossPipeline {
     return mel; // [80 * 3000]
   }
 
-  async encodeAudio(wav /* Float32Array 16 kHz mono */) {
+  async encodeAudio(wav /* Float32Array 16 kHz mono */, onStage = null) {
     const { sr, hop, n_mel, chunk_frames } = this.cfg;
     const chunkSamples = sr * 30;
+    const nChunks = Math.ceil(wav.length / chunkSamples);
     const parts = [];
     let total = 0;
+    let ci = 0;
     for (let off = 0; off < wav.length; off += chunkSamples) {
+      if (onStage) onStage("encode", `${++ci}/${nChunks}`);
       const piece = wav.subarray(off, Math.min(off + chunkSamples, wav.length));
       const nFrames = Math.floor(piece.length / hop);
       const keep = Math.floor(Math.floor(nFrames / 2) / 4);
@@ -128,10 +131,12 @@ export class MossPipeline {
   }
 
   /* ---- greedy generate with streaming callback -------------------------- */
-  async generate(wav, { maxNew = 1024, onToken = null, signal = null } = {}) {
+  async generate(wav, { maxNew = 1024, onToken = null, signal = null,
+                        onStage = null } = {}) {
     const { prefix_ids, suffix_ids, audio_pad_id, eos_id,
             n_layers, kv_heads, head_dim } = this.cfg;
-    const audio = await this.encodeAudio(wav);
+    const audio = await this.encodeAudio(wav, onStage);
+    if (onStage) onStage("prefill", `${audio.count + 90} tokens`);
     const ids = [...prefix_ids,
                  ...new Array(audio.count).fill(audio_pad_id),
                  ...suffix_ids];
@@ -215,7 +220,7 @@ MossPipeline.prototype.embedSegment = async function (wav, startS, endS) {
  * the config validated on real meetings). */
 MossPipeline.prototype.transcribeMeeting = async function (wav, {
   windowS = 300, maxNewPerWindow = 2048,
-  onToken = null, onWindow = null, signal = null,
+  onToken = null, onWindow = null, signal = null, onStage = null,
 } = {}) {
   const sr = this.cfg.sr;
   const totalS = wav.length / sr;
@@ -231,6 +236,8 @@ MossPipeline.prototype.transcribeMeeting = async function (wav, {
       Math.floor(off * sr), Math.floor(Math.min(off + windowS, totalS) * sr));
     const res = await this.generate(piece, {
       maxNew: maxNewPerWindow, signal,
+      onStage: (stage, detail) =>
+        onStage && onStage(wi, offsets.length, stage, detail),
       onToken: (text, n, dt) =>
         onToken && onToken(wi, offsets.length, text, n, dt),
     });
