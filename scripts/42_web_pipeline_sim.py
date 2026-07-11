@@ -134,6 +134,7 @@ def main() -> int:
     ap.add_argument("--ref-model", default="models/moss_ft_zhtw_v2",
                     help="bf16 HF model for accuracy reference ('' skips)")
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--s2tw", action="store_true", help="script-normalize hyp+ref before MER")
     args = ap.parse_args()
 
     import soundfile as sf
@@ -180,6 +181,11 @@ def main() -> int:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    _s2tw = None
+    if getattr(args, "s2tw", False):
+        from opencc import OpenCC
+        _s2tw = OpenCC("s2tw")
+
     for t in args.take_s:
         piece = wav[: int(t * 16000)]
         text, n_tok, dt = pipe.generate(piece)
@@ -191,6 +197,8 @@ def main() -> int:
         if t in ref_texts:
             ref_plain = "".join(s.text for s in parse_transcript_lenient(ref_texts[t]))
             hyp_plain = "".join(s.text for s in segs)
+            if _s2tw is not None:
+                ref_plain, hyp_plain = _s2tw.convert(ref_plain), _s2tw.convert(hyp_plain)
             mer_v = mer_fn(ref_plain, hyp_plain)
             print(f"vs bf16 FT: MER={mer_v:.3f}")
             print("bf16:", ref_texts[t][:220])
