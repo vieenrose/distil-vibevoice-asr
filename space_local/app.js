@@ -3,13 +3,17 @@ import { MossPipeline, parseLenientWithTail } from "./pipeline.js";
 
 const ort = window.ort;
 const $ = (id) => document.getElementById(id);
+// weights live in a model repo (1 GB Space storage cap); resolve URLs are
+// CORS-enabled and CDN-cached
+const WEIGHTS =
+  "https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-onnx/resolve/main/web/";
 function modelSet(quality) {
   return {
-    encoder: "models/encoder.int8.onnx",
-    embedding: "models/embedding.int8.onnx",
-    decoder: quality === "q4" ? "models/decoder.q4.onnx"
-                              : "models/decoder.int8.onnx",
-    ecapa: "models/ecapa.onnx",
+    encoder: WEIGHTS + "encoder.int8.onnx",
+    embedding: WEIGHTS + "embedding.int8.onnx",
+    decoder: WEIGHTS + (quality === "q4" ? "decoder.q4.onnx"
+                                         : "decoder.int8.onnx"),
+    ecapa: WEIGHTS + "ecapa.onnx",
   };
 }
 const MIC_MAX_S = 120;

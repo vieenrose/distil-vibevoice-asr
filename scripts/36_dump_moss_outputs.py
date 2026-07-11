@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "data/chunk_dump"
 MANIFESTS = ["data/raw/ivod_eval/manifest.jsonl",
              "data/raw/ivod_demo/manifest_long.jsonl"]
-WINDOWS = [300.0, 600.0]
+WINDOWS = [180.0, 300.0]
 SINGLE_PASS_MAX_MIN = 35.0
 
 
