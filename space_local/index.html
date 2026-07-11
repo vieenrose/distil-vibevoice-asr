@@ -77,6 +77,13 @@
   audio { width:100%; height:38px; }
   #statusline { display:flex; gap:12px; align-items:baseline; flex-wrap:wrap;
     font-size:.88rem; margin:8px 0; }
+  #heartbeat { display:none; align-items:center; gap:7px; font-size:.82rem;
+    color:var(--muted); font-variant-numeric:tabular-nums; }
+  #hb-dot { width:10px; height:10px; border-radius:50%; background:var(--ok);
+    animation:hb 1s infinite; flex:none; }
+  #hb-dot.warn { background:#eab308; }
+  #hb-dot.bad { background:var(--danger); animation:none; }
+  @keyframes hb { 0%{transform:scale(1);opacity:1} 50%{transform:scale(1.5);opacity:.45} 100%{transform:scale(1);opacity:1} }
   #status { color:var(--muted); }
   #stats { color:var(--ok); font-weight:500; }
   #bar { width:100%; height:5px; background:var(--border); border-radius:99px;
@@ -174,6 +181,7 @@
     <h2>Transcript</h2>
     <div id="player-box" style="display:none"><audio id="audio" controls preload="none"></audio></div>
     <div id="statusline"><span id="status">Pick an example or provide audio.</span><span id="stats"></span></div>
+    <div id="heartbeat"><span id="hb-dot"></span><span id="hb-text"></span></div>
     <div id="bar"><div></div></div>
     <div class="tools">
       <input id="search" type="search" placeholder="搜尋逐字稿 / search…">

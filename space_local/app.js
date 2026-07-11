@@ -84,6 +84,9 @@ function ensureModel() {
     const p = new MossPipeline(ort, cfg, melBin, vocab);
     p.eps = ["wasm"];
     ort.env.wasm.numThreads = nThreads;
+    // run wasm inference in a worker so the page never freezes and the
+    // heartbeat below reflects real liveness
+    ort.env.wasm.proxy = true;
     await p.load(MODELS, fetchWithProgress, (name, done, total) => {
       const pg = $(`pg-${name}`);
       if (pg && total) pg.value = (100 * done) / total;
@@ -320,6 +323,35 @@ $("btn-rec").onclick = async () => {
 
 $("btn-abort").onclick = () => abortCtl && abortCtl.abort();
 
+/* ---- liveness heartbeat: time since the model last made progress ------- */
+let lastBeat = 0, beatWhat = "", runT0 = 0, hbTimer = null;
+function beat(what) { lastBeat = Date.now(); beatWhat = what; }
+function hbStart() {
+  runT0 = Date.now();
+  beat("starting");
+  $("heartbeat").style.display = "flex";
+  hbTimer = setInterval(() => {
+    const idle = (Date.now() - lastBeat) / 1000;
+    const el = (Date.now() - runT0) / 1000;
+    const dot = $("hb-dot");
+    let note;
+    if (idle < 8) { dot.className = ""; note = "model active"; }
+    else if (idle < 90) {
+      dot.className = "warn";
+      note = `computing a large step — ${idle.toFixed(0)}s since last output (normal for prefill)`;
+    } else {
+      dot.className = "bad";
+      note = `no progress for ${idle.toFixed(0)}s — likely stalled; use ✕ Stop and retry`;
+    }
+    $("hb-text").textContent =
+      `${fmt(el)} elapsed · ${beatWhat} · ${note}`;
+  }, 1000);
+}
+function hbStop() {
+  clearInterval(hbTimer);
+  $("heartbeat").style.display = "none";
+}
+
 /* ============================ live transcription ============================ */
 async function transcribe(wav) {
   if (busy) return;
@@ -330,8 +362,10 @@ async function transcribe(wav) {
   const nWin = Math.max(1, Math.ceil(secs / WINDOW_S));
   const t0 = Date.now();
   let lastLinked = [];
+  hbStart();
   try {
     await ensureModel();
+    beat("model loaded");
     $("status").textContent =
       `${fmt(secs)} of audio → ${nWin} × ${WINDOW_S / 60}-min window(s)`;
     $("bar").style.display = "";
@@ -339,12 +373,14 @@ async function transcribe(wav) {
       windowS: WINDOW_S,
       signal: abortCtl.signal,
       onStage: (wi, nw, stage, detail) => {
+        beat(stage === "encode" ? `encoding ${detail}` : "prefill");
         const what = stage === "encode"
           ? `listening to the audio (chunk ${detail})`
           : `reading it into the model (${detail}) — first words follow`;
         $("status").textContent = `Window ${wi + 1}/${nw} · ${what}…`;
       },
       onToken: (wi, nw, text, n, dt) => {
+        beat(`decoding · ${(n / dt).toFixed(1)} tok/s`);
         const off = wi * WINDOW_S;
         const { segs: prov, tail } = parseLenientWithTail(text);
         segs = [...lastLinked, ...prov.map((s) => ({
@@ -355,6 +391,7 @@ async function transcribe(wav) {
           `Window ${wi + 1}/${nw} · ${(n / dt).toFixed(1)} tok/s`;
       },
       onWindow: (linked, done, total) => {
+        beat(`window ${done}/${total} linked`);
         lastLinked = linked;
         segs = linked;
         renderLegend();
@@ -384,6 +421,7 @@ async function transcribe(wav) {
     if (pipe) $("status").textContent = "Inference failed: " + e.message;
     console.error(e);
   } finally {
+    hbStop();
     busy = false;
     abortCtl = null;
     $("btn-abort").style.display = "none";
