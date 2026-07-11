@@ -50,7 +50,7 @@ def main():
         inputs = proc(text=text, audio=audios, return_tensors="pt").to(dev, model.dtype)
         t = time.time()
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=800, do_sample=False)
+            out = model.generate(**inputs, max_new_tokens=800, do_sample=False, repetition_penalty=1.3, no_repeat_ngram_size=3)
         gen = proc.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         r = check_fidelity(transcript, gen)
         h_rates.append(r.hallucination_rate)
