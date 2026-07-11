@@ -38,13 +38,12 @@ async function ensureModel(quality) {
   ort.env.wasm.numThreads = self.crossOriginIsolated
     ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
   ort.env.wasm.proxy = false;  // we ARE the worker
-  // default: QAT q4 + fp16-KV decoder (int8-quality at q4 size, half the KV
-  // memory). 'accuracy' keeps the int8 decoder (fp32 KV) for max fidelity.
-  const accuracy = quality === "int8";
+  // int8 decoder only (highest accuracy; the q4 variant saved ~19% download
+  // for a real accuracy hit, not worth it — diarization/accuracy first).
   const models = {
     encoder: WEIGHTS + "encoder.int8.onnx",
     embedding: WEIGHTS + "embedding.int8.onnx",
-    decoder: accuracy ? WEIGHTS + "decoder.int8.onnx" : WEIGHTS + "decoder.qat.onnx",
+    decoder: WEIGHTS + "decoder.int8.onnx",
     ecapa: WEIGHTS + "ecapa.onnx",
   };
   const [cfg, melBin, vocab] = await Promise.all([
@@ -53,7 +52,7 @@ async function ensureModel(quality) {
     fetch("models/vocab.json").then((r) => r.json()),
   ]);
   const p = new MossPipeline(ort, cfg, melBin, vocab);
-  // all web decoders use fp32 KV (onnxruntime-web lacks Float16Array support)
+  // fp32 KV (onnxruntime-web lacks Float16Array support)
   p.eps = ["wasm"];
   await p.load(models, fetchProgress,
     (name, done, total) => post("dl", { name, done, total }));

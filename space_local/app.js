@@ -81,8 +81,7 @@ function primeDownloadBars(quality) {
 }
 
 $("btn-load").onclick = () => {
-  const quality =
-    document.querySelector('input[name="quality"]:checked')?.value || "qat";
+  const quality = "int8";
   if (workerReady) return;
   primeDownloadBars(quality);
   // a bare load: run with an empty tail so the worker just initializes
@@ -360,8 +359,7 @@ async function transcribe(wav) {
   let lastLinked = [];
   hbStart();
   beat("loading model");
-  const quality =
-    document.querySelector('input[name="quality"]:checked')?.value || "qat";
+  const quality = "int8";
   if (!workerReady) primeDownloadBars(quality);
   $("status").textContent =
     `${fmt(secs)} of audio → ${nWin} × ${WINDOW_S / 60}-min window(s)`;
