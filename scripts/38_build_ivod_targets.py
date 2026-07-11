@@ -2,6 +2,14 @@
 """Fuse IVOD catalog whisperx (text+timestamps) x pyannote (speakers) into
 MOSS-format training targets for real far-field fine-tuning.
 
+v4 label-quality revision (v3 gate finding: fused segments spanning speaker
+turns taught the model to emit long merged turns -> 123-min cluster purity
+dropped 0.912->0.816). A 15 s length cap is NOT viable (median whisperx segment
+is 18 s; the cap kept only 15% of speech). Instead the winning pyannote speaker
+must cover >=70% of the segment span and >=75% of overlapped time — this drops
+exactly the boundary-crossing segments while keeping clean single-speaker
+turns.
+
 For each whisperx segment (shifted by the collector's dead-air skip):
   - speaker = pyannote turn with max temporal overlap
   - drop if the winning speaker covers <60% of the overlapped time (ambiguous /
@@ -34,8 +42,9 @@ def load_collector():
     return m
 
 
-def fuse_meeting(rec: dict, c01b, cc, min_dominance: float = 0.6,
-                 min_dur: float = 0.4, max_dur: float = 30.0):
+def fuse_meeting(rec: dict, c01b, cc, min_dominance: float = 0.75,
+                 min_dur: float = 0.4, max_dur: float = 30.0,
+                 min_coverage: float = 0.7):
     """Return (segments, stats) for one collected meeting."""
     tr = rec.get("meta", {}).get("transcript") or {}
     wx = tr.get("whisperx") or []
@@ -77,7 +86,7 @@ def fuse_meeting(rec: dict, c01b, cc, min_dominance: float = 0.6,
             n_drop_overlap += 1
             continue
         best_spk, best = max(ov.items(), key=lambda kv: kv[1])
-        if best / total < min_dominance or best / (e - s) < 0.3:
+        if best / total < min_dominance or best / (e - s) < min_coverage:
             n_drop_overlap += 1
             continue
         if best_spk not in spk_index:
