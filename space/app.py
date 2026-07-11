@@ -40,6 +40,13 @@ PROMPT = (
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
 
+# Out-of-domain (far-field) windows can flip whole windows to Simplified
+# (base-model prior); s2tw is a pure script conversion that never touches
+# phrases, so proper nouns survive.
+from opencc import OpenCC  # noqa: E402
+
+_S2TW = OpenCC("s2tw")
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, trust_remote_code=True, dtype="auto"
@@ -307,7 +314,7 @@ def run(audio_path: str | None, max_minutes: float,
                 "start": round(off + s.start, 2),
                 "end": round(off + end, 2),
                 "speaker": s.speaker,
-                "text": s.text,
+                "text": _S2TW.convert(s.text),
                 "emb": embed_segment(piece, s.start, end),
             })
         linked = link_speakers(segs)

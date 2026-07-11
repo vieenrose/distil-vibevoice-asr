@@ -24,6 +24,12 @@ def main() -> int:
     ap.add_argument("--window", default="300")
     args = ap.parse_args()
 
+    # far-field/out-of-domain windows can flip the whole window to Simplified
+    # (base-model prior); s2tw is a pure script conversion — no phrase swaps,
+    # so proper nouns like 高端(疫苗) survive (s2twp would corrupt them)
+    from opencc import OpenCC
+    cc = OpenCC("s2tw")
+
     d = json.loads((ROOT / f"data/chunk_dump/{args.stem}.json").read_text(
         encoding="utf-8"))
     embs_all = dict(np.load(ROOT / f"data/chunk_dump/{args.stem}.npz"))
@@ -40,7 +46,7 @@ def main() -> int:
                      "min_core_dur_s": MIN_CORE_DUR_S,
                      "model": "Luigi/moss-transcribe-diarize-zhtw"},
         "segments": [{"start": s["start"], "end": s["end"],
-                      "speaker": lab, "text": s["text"]}
+                      "speaker": lab, "text": cc.convert(s["text"])}
                      for s, lab in zip(segs, labels)],
     }
     dst = ROOT / f"space/examples/{args.stem}.json"
