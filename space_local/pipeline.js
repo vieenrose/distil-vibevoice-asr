@@ -199,6 +199,144 @@ export class MossPipeline {
   }
 }
 
+/* ---- meeting mode: windows + ECAPA + global linking ----------------------- */
+
+MossPipeline.prototype.embedSegment = async function (wav, startS, endS) {
+  const sr = this.cfg.sr;
+  const a = wav.subarray(Math.floor(startS * sr), Math.floor(endS * sr));
+  if (a.length < 0.3 * sr || !this.sessions.ecapa) return null;
+  const t = new this.ort.Tensor("float32", new Float32Array(a), [1, a.length]);
+  const out = await this.sessions.ecapa.run({ wav: t });
+  return new Float32Array(out.embedding.data); // already L2-normalized
+};
+
+/* Transcribe arbitrarily long audio: sequential windows, per-segment ECAPA,
+ * global re-linking after each window (core-seg AHC @0.45 + nearest-centroid,
+ * the config validated on real meetings). */
+MossPipeline.prototype.transcribeMeeting = async function (wav, {
+  windowS = 300, maxNewPerWindow = 2048,
+  onToken = null, onWindow = null, signal = null,
+} = {}) {
+  const sr = this.cfg.sr;
+  const totalS = wav.length / sr;
+  const offsets = [];
+  for (let off = 0; off < totalS; off += windowS) {
+    if (totalS - off >= 2 || off === 0) offsets.push(off);
+  }
+  const segs = []; // {start,end,speaker(window-local),text,emb}
+  for (let wi = 0; wi < offsets.length; wi++) {
+    if (signal && signal.aborted) break;
+    const off = offsets[wi];
+    const piece = wav.subarray(
+      Math.floor(off * sr), Math.floor(Math.min(off + windowS, totalS) * sr));
+    const res = await this.generate(piece, {
+      maxNew: maxNewPerWindow, signal,
+      onToken: (text, n, dt) =>
+        onToken && onToken(wi, offsets.length, text, n, dt),
+    });
+    for (const s of parseLenient(res.text)) {
+      const end = Math.min(s.end, piece.length / sr + 1.0);
+      segs.push({
+        start: off + s.start, end: off + end,
+        text: s.text,
+        emb: await this.embedSegment(piece, s.start, end),
+      });
+    }
+    const linked = linkSpeakers(segs);
+    if (onWindow) onWindow(linked, wi + 1, offsets.length);
+  }
+  return linkSpeakers(segs);
+};
+
+/* Core-segment average-linkage AHC @ cosine 0.45; segments < 3 s snap to the
+ * nearest cluster centroid; no-embedding segments inherit the previous label. */
+export function linkSpeakers(segs, threshold = 0.45, minCoreDur = 3.0) {
+  const withEmb = [];
+  segs.forEach((s, i) => { if (s.emb) withEmb.push(i); });
+  const core = withEmb.filter(
+    (i) => segs[i].end - segs[i].start >= minCoreDur);
+  const labOf = new Map();
+  if (core.length >= 2) {
+    // distance matrix (cosine distance on L2-normalized embeddings)
+    const n = core.length;
+    const D = new Float64Array(n * n);
+    for (let a = 0; a < n; a++) {
+      for (let b = a + 1; b < n; b++) {
+        let dot = 0;
+        const ea = segs[core[a]].emb, eb = segs[core[b]].emb;
+        for (let k = 0; k < ea.length; k++) dot += ea[k] * eb[k];
+        D[a * n + b] = D[b * n + a] = 1 - dot;
+      }
+    }
+    // average-linkage agglomeration (Lance-Williams)
+    const clusters = core.map((_, i) => [i]);
+    const active = new Set(clusters.map((_, i) => i));
+    for (;;) {
+      let bi = -1, bj = -1, bd = threshold;
+      for (const i of active) for (const j of active) {
+        if (j <= i) continue;
+        const d = D[i * n + j];
+        if (d < bd) { bd = d; bi = i; bj = j; }
+      }
+      if (bi < 0) break;
+      const ni = clusters[bi].length, nj = clusters[bj].length;
+      for (const k of active) {
+        if (k === bi || k === bj) continue;
+        const d = (ni * D[bi * n + k] + nj * D[bj * n + k]) / (ni + nj);
+        D[bi * n + k] = D[k * n + bi] = d;
+      }
+      clusters[bi] = clusters[bi].concat(clusters[bj]);
+      active.delete(bj);
+    }
+    // cluster centroids + assignments
+    const cents = [];
+    for (const ci of active) {
+      const members = clusters[ci];
+      const dim = segs[core[0]].emb.length;
+      const c = new Float64Array(dim);
+      for (const m of members) {
+        const e = segs[core[m]].emb;
+        for (let k = 0; k < dim; k++) c[k] += e[k];
+      }
+      let nrm = 0;
+      for (let k = 0; k < dim; k++) nrm += c[k] * c[k];
+      nrm = Math.sqrt(nrm) || 1;
+      for (let k = 0; k < dim; k++) c[k] /= nrm;
+      cents.push(c);
+      for (const m of members) labOf.set(core[m], cents.length - 1);
+    }
+    for (const i of withEmb) {
+      if (labOf.has(i)) continue;
+      let best = 0, bestDot = -2;
+      for (let c = 0; c < cents.length; c++) {
+        let dot = 0;
+        const e = segs[i].emb;
+        for (let k = 0; k < e.length; k++) dot += cents[c][k] * e[k];
+        if (dot > bestDot) { bestDot = dot; best = c; }
+      }
+      labOf.set(i, best);
+    }
+  } else if (withEmb.length) {
+    for (const i of withEmb) labOf.set(i, 0);
+  }
+  const canon = new Map();
+  const out = [];
+  let prev = "S01";
+  segs.forEach((s, i) => {
+    let spk;
+    const l = labOf.get(i);
+    if (l === undefined) {
+      spk = prev;
+    } else {
+      if (!canon.has(l)) canon.set(l, `S${String(canon.size + 1).padStart(2, "0")}`);
+      spk = canon.get(l);
+    }
+    prev = spk;
+    out.push({ start: s.start, end: s.end, speaker: spk, text: s.text });
+  });
+  return out;
+}
+
 /* ---- lenient [start][Sxx]text[end] parser -------------------------------- */
 const SEG_RE =
   /\[(\d{1,7}(?:\.\d{1,3})?)\](?:\[(S\d{1,3})\])?([^\[\]]+?)\[(\d{1,7}(?:\.\d{1,3})?)\]/g;

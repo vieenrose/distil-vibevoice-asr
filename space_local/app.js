@@ -1,5 +1,5 @@
-/* UI + audio capture for the fully-local zh-TW transcriber. */
-import { MossPipeline, parseLenient } from "./pipeline.js";
+/* UI + audio capture for the fully-local zh-TW meeting transcriber. */
+import { MossPipeline, parseLenient, linkSpeakers } from "./pipeline.js";
 
 const ort = window.ort;
 const $ = (id) => document.getElementById(id);
@@ -7,20 +7,24 @@ const MODELS = {
   encoder: "models/encoder.int8.onnx",
   embedding: "models/embedding.int8.onnx",
   decoder: "models/decoder.q4.onnx",
+  ecapa: "models/ecapa.onnx",
 };
-const MAX_S = 120;
-const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8", "#3aa6b9"];
+const MIC_MAX_S = 120;
+const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
+                 "#3aa6b9", "#d0679d", "#7a9a01", "#b05c45", "#5c7285"];
 
 let pipe = null;
+let abortCtl = null;
 let s2tw = (t) => t;
 try {
   if (window.OpenCC) s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
 } catch (e) { console.warn("opencc unavailable", e); }
 
 const hasWebGPU = !!navigator.gpu;
+const WINDOW_S = hasWebGPU ? 300 : 180; // wasm: smaller KV to stay in 32-bit memory
 $("ep-note").textContent = hasWebGPU
-  ? "WebGPU detected — decoding will use your GPU."
-  : "No WebGPU — falling back to CPU (wasm); expect a few tokens/second.";
+  ? `WebGPU detected — ${WINDOW_S / 60}-minute windows on your GPU.`
+  : `No WebGPU — CPU (wasm) fallback, ${WINDOW_S / 60}-minute windows; expect slow decoding.`;
 
 async function fetchWithProgress(url, onProgress) {
   const r = await fetch(url);
@@ -60,7 +64,7 @@ $("btn-load").onclick = async () => {
       const pg = $(`pg-${name}`);
       if (pg && total) pg.value = (100 * done) / total;
     });
-    $("status").textContent = "Model ready. Record or pick a file.";
+    $("status").textContent = "Model ready. Record or pick a meeting file.";
     $("btn-rec").disabled = false;
     $("file-in").disabled = false;
     $("loader").style.opacity = 0.6;
@@ -72,12 +76,12 @@ $("btn-load").onclick = async () => {
 };
 
 /* ---- audio input ---------------------------------------------------------- */
-async function blobTo16k(blob) {
+async function blobTo16k(blob, maxS = 0) {
   const arr = await blob.arrayBuffer();
   const ac = new AudioContext();
   const decoded = await ac.decodeAudioData(arr);
   ac.close();
-  const secs = Math.min(decoded.duration, MAX_S);
+  const secs = maxS > 0 ? Math.min(decoded.duration, maxS) : decoded.duration;
   const oac = new OfflineAudioContext(1, Math.ceil(secs * 16000), 16000);
   const src = oac.createBufferSource();
   src.buffer = decoded;
@@ -90,10 +94,7 @@ async function blobTo16k(blob) {
 let recorder = null, recChunks = [];
 $("btn-rec").onclick = async () => {
   const btn = $("btn-rec");
-  if (recorder && recorder.state === "recording") {
-    recorder.stop();
-    return;
-  }
+  if (recorder && recorder.state === "recording") { recorder.stop(); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recChunks = [];
@@ -103,14 +104,14 @@ $("btn-rec").onclick = async () => {
       stream.getTracks().forEach((t) => t.stop());
       btn.textContent = "● Record";
       btn.classList.remove("rec");
-      const wav = await blobTo16k(new Blob(recChunks));
-      transcribe(wav);
+      transcribe(await blobTo16k(new Blob(recChunks), MIC_MAX_S));
     };
     recorder.start();
     btn.textContent = "■ Stop";
     btn.classList.add("rec");
-    $("status").textContent = "Recording… press Stop when done (max 2 min used).";
-    setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, MAX_S * 1000);
+    $("status").textContent = `Recording… press Stop (max ${MIC_MAX_S / 60} min).`;
+    setTimeout(() => { if (recorder.state === "recording") recorder.stop(); },
+               MIC_MAX_S * 1000);
   } catch (e) {
     $("status").textContent = "Mic error: " + e.message;
   }
@@ -121,67 +122,105 @@ $("file-in").onchange = async (e) => {
   if (!f) return;
   $("status").textContent = `Decoding ${f.name}…`;
   try {
-    transcribe(await blobTo16k(f));
+    transcribe(await blobTo16k(f)); // full file, no cap
   } catch (err) {
     $("status").textContent = "Decode failed: " + err.message;
   }
 };
 
-/* ---- transcription -------------------------------------------------------- */
+$("btn-abort").onclick = () => abortCtl && abortCtl.abort();
+
+/* ---- rendering ------------------------------------------------------------ */
 function fmt(t) {
-  const m = Math.floor(t / 60), s = (t % 60).toFixed(1);
-  return `${m}:${s.padStart(4, "0")}`;
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60),
+        s = Math.floor(t % 60);
+  return (h ? h + ":" : "") + String(m).padStart(h ? 2 : 1, "0") + ":" +
+         String(s).padStart(2, "0");
 }
 
-function render(text) {
-  const segs = parseLenient(text);
+function renderSegs(segs, tail = "") {
   const box = $("transcript");
-  if (!segs.length) {
-    box.innerHTML = `<div class="raw">${text.replace(/</g, "&lt;")}</div>`;
-    return;
-  }
   const speakers = [...new Set(segs.map((s) => s.speaker))];
   const color = Object.fromEntries(
     speakers.map((s, i) => [s, PALETTE[i % PALETTE.length]]));
   box.innerHTML = segs.map((s) =>
     `<div class="seg"><span class="ts">${fmt(s.start)}–${fmt(s.end)}</span>` +
     `<span class="spk" style="color:${color[s.speaker]}">${s.speaker}</span>` +
-    `<span>${s.text.replace(/</g, "&lt;")}</span></div>`).join("");
+    `<span>${s2tw(s.text).replace(/</g, "&lt;")}</span></div>`).join("") +
+    (tail ? `<div class="raw">${s2tw(tail).replace(/</g, "&lt;")}</div>` : "");
   box.scrollTop = box.scrollHeight;
+  return speakers.length;
 }
 
+function offerSrt(segs) {
+  const ts = (t) => {
+    const h = String(Math.floor(t / 3600)).padStart(2, "0");
+    const m = String(Math.floor((t % 3600) / 60)).padStart(2, "0");
+    const s = String(Math.floor(t % 60)).padStart(2, "0");
+    const ms = String(Math.round((t % 1) * 1000)).padStart(3, "0");
+    return `${h}:${m}:${s},${ms}`;
+  };
+  const srt = segs.map((s, i) =>
+    `${i + 1}\n${ts(s.start)} --> ${ts(s.end)}\n[${s.speaker}] ${s2tw(s.text)}\n`
+  ).join("\n");
+  const url = URL.createObjectURL(new Blob([srt], { type: "text/plain" }));
+  const a = $("dl-srt");
+  a.href = url;
+  a.download = "transcript.srt";
+  a.style.display = "inline";
+}
+
+/* ---- transcription -------------------------------------------------------- */
 let busy = false;
 async function transcribe(wav) {
   if (!pipe || busy) return;
   busy = true;
+  abortCtl = new AbortController();
   $("btn-rec").disabled = true;
   $("file-in").disabled = true;
+  $("btn-abort").style.display = "inline";
+  $("dl-srt").style.display = "none";
   const secs = wav.length / 16000;
-  $("status").textContent = `Encoding ${secs.toFixed(0)} s of audio…`;
+  const nWin = Math.max(1, Math.ceil(secs / WINDOW_S));
+  $("status").textContent =
+    `${fmt(secs)} of audio → ${nWin} window(s) of ${WINDOW_S / 60} min…`;
   $("stats").textContent = "";
   $("transcript").innerHTML = '<span class="sub">…</span>';
+  const t0 = Date.now();
   try {
-    const res = await pipe.generate(wav, {
-      maxNew: 1500,
-      onToken: (text, n, dt) => {
-        render(s2tw(text));
-        $("status").textContent = `Decoding… ${n} tokens`;
+    const segs = await pipe.transcribeMeeting(wav, {
+      windowS: WINDOW_S,
+      signal: abortCtl.signal,
+      onToken: (wi, nw, text, n, dt) => {
+        $("status").textContent =
+          `Window ${wi + 1}/${nw} · ${n} tokens · ${(n / dt).toFixed(1)} tok/s`;
+        if (wi === 0) renderSegs([], text); // stream raw text for the first window
+      },
+      onWindow: (linked, done, total) => {
+        const nSpk = renderSegs(linked);
+        const el = (Date.now() - t0) / 1000;
+        const eta = (el / done) * (total - done);
         $("stats").textContent =
-          `${(n / dt).toFixed(1)} tok/s · ${dt.toFixed(0)} s elapsed`;
+          `${done}/${total} windows · ${linked.length} segments · ` +
+          `${nSpk} speakers · ETA ${fmt(eta)}`;
       },
     });
-    render(s2tw(res.text));
-    $("status").textContent = "Done.";
+    const el = (Date.now() - t0) / 1000;
+    const nSpk = renderSegs(segs);
+    const note = abortCtl.signal.aborted ? " (stopped early)" : "";
+    $("status").textContent = "Done." + note;
     $("stats").textContent =
-      `${res.nTokens} tokens · ${res.seconds.toFixed(1)} s · ` +
-      `${(res.nTokens / res.seconds).toFixed(1)} tok/s · ` +
-      `RTF ${(res.seconds / secs).toFixed(2)} (all local)`;
+      `${fmt(secs)} audio · ${segs.length} segments · ${nSpk} speakers · ` +
+      `${fmt(el)} compute · ${(secs / el).toFixed(2)}× realtime · all local`;
+    if (segs.length) offerSrt(segs);
   } catch (e) {
     $("status").textContent = "Inference failed: " + e.message;
     console.error(e);
   } finally {
     busy = false;
+    abortCtl = null;
     $("btn-rec").disabled = false;
     $("file-in").disabled = false;
+    $("btn-abort").style.display = "none";
   }
 }

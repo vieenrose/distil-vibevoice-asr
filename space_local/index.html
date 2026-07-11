@@ -46,31 +46,32 @@
     <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw">Luigi/moss-transcribe-diarize-zhtw</a>
     (0.9B, q4/int8 ONNX) running entirely on <b>your</b> device via
     <a href="https://onnxruntime.ai/docs/tutorials/web/">onnxruntime-web</a>.
-    No audio ever leaves this page — close the tab, it's gone. Record a short clip
-    (≤ 2 min) or drop a file, and watch the timestamped, speaker-tagged transcript
-    stream out token by token. For hour-long meetings use the
+    No audio ever leaves this page — close the tab, it's gone. Record a clip or drop a meeting file of any length: it is transcribed in windows, every segment is voice-fingerprinted (ECAPA), and one global clustering pass keeps speaker labels consistent across the whole meeting — the same pipeline as the server demos, entirely on your device. In a hurry? The
     <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber-live">ZeroGPU Space</a>
-    or the <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber">instant viewer</a>.
+    does the same job on a server GPU, and the
+    <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber">viewer</a> has
+    precomputed 2-hour examples.
   </p>
 
   <div class="card" id="loader">
-    <b>1 · Load the model</b> — ~840 MB one-time download, cached by your browser.
+    <b>1 · Load the model</b> — ~920 MB one-time download, cached by your browser.
     <div id="ep-note" class="sub"></div>
     <p><button id="btn-load">Download &amp; initialize</button></p>
     <div id="dl-bars"></div>
   </div>
 
   <div class="card">
-    <b>2 · Provide audio</b> (≤ 120 s used)
+    <b>2 · Provide audio</b> — mic (≤ 2 min) or a meeting file of ANY length
     <p>
       <button id="btn-rec" disabled>● Record</button>
       <input type="file" id="file-in" accept="audio/*" disabled>
+      <button id="btn-abort" style="display:none;background:#e05563">✕ Stop processing</button>
     </p>
     <div id="status">Model not loaded yet.</div>
   </div>
 
   <div class="card">
-    <b>3 · Transcript</b>
+    <b>3 · Transcript</b> <a id="dl-srt" style="display:none;margin-left:10px">⬇ SRT</a>
     <div id="stats"></div>
     <div id="transcript"><span class="sub">—</span></div>
   </div>
@@ -79,8 +80,13 @@
     <b>Accuracy &amp; speed</b> — the q4/int8 graphs measure <b>MER 0.068 vs the full
     bf16 fine-tune</b> on held-out real meeting audio (Traditional-Chinese output is
     enforced by the same OpenCC s2tw step the reference pipeline uses).
-    Reference decode speeds: 8–25 tok/s CPU (a 30 s clip ≈ 5–15 s of compute);
-    WebGPU is used automatically when available.
+    Reference decode speeds: 8–25 tok/s CPU (a 30 s clip ≈ 5–15 s of compute;
+    an hour of meeting audio can take from tens of minutes up to a few hours of
+    browser compute depending on your hardware — the transcript streams as it
+    goes and can be stopped at any time, keeping partial results).
+    Speaker linking: segments ≥ 3 s cluster at cosine 0.45 (average linkage),
+    shorter ones snap to the nearest centroid — validated on real meetings
+    (DER 0.056 / 30 min, consistency 0.912 / 123 min vs pyannote).
     <br>The same exported graphs power the
     <a href="https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize">sherpa-onnx C++ port</a>
     for phones.
