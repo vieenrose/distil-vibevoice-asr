@@ -1,0 +1,9 @@
+torch
+torchaudio
+transformers>=5.10,<6
+speechbrain>=1.0
+scipy
+numpy
+soundfile
+librosa
+huggingface_hub

@@ -53,3 +53,4 @@ vendor/
 .venv_tts/
 vendor/
 space/examples/*.mp3
+space_static/examples/*.mp3
