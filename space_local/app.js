@@ -1,7 +1,7 @@
 /* UI for the fully-local zh-TW meeting transcriber.
  * Examples render instantly from precomputed JSON; user audio runs through
  * the in-browser pipeline (pipeline.js) with token-level streaming. */
-import { MossPipeline, parseLenientWithTail } from "./pipeline.js";
+import { parseLenientWithTail } from "./pipeline.js";
 
 const ort = window.ort;
 const $ = (id) => document.getElementById(id);
@@ -16,47 +16,42 @@ const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
                  "#20a4b5", "#cc6699", "#899a20"];
 
 const WINDOW_S = 180;  // CPU-only; 180 s windows validated (DER ~= 300 s)
-let pipe = null, loading = null, abortCtl = null, busy = false;
+let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
 let s2tw = (t) => t;
 try {
   if (window.OpenCC) s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
 } catch (e) { console.warn("opencc unavailable", e); }
 
-const nThreads = window.crossOriginIsolated
-  ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
 $("input-note").textContent =
-  `CPU-only · ${nThreads} thread${nThreads > 1 ? "s" : ""}` +
-  (nThreads === 1 ? " (multithreading unavailable in this browser)" : "");
+  "CPU-only · runs in a background worker (page stays responsive)";
 
-/* ============================ model loading ============================ */
-function modelSet(quality) {
-  return {
-    encoder: WEIGHTS + "encoder.int8.onnx",
-    embedding: WEIGHTS + "embedding.int8.onnx",
-    decoder: WEIGHTS + (quality === "q4" ? "decoder.q4.onnx" : "decoder.int8.onnx"),
-    ecapa: WEIGHTS + "ecapa.onnx",
+/* ============================ inference worker ============================ */
+let worker = null, workerReady = false, onWorkerMsg = null;
+function getWorker() {
+  if (worker) return worker;
+  worker = new Worker("infer-worker.js", { type: "module" });
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === "dl") {
+      const pg = $(`pg-${m.name}`);
+      if (pg && m.total) pg.value = (100 * m.done) / m.total;
+      dlState = { done: m.done, total: m.total };
+      beat("downloading model");
+    } else if (m.type === "ready") {
+      dlState = null;
+      workerReady = true;
+      $("dl-bars").innerHTML = "";
+      setModelState("ready",
+        `Model ready · CPU ×${m.threads} · ${WINDOW_S / 60}-min windows`);
+    }
+    if (onWorkerMsg) onWorkerMsg(m);
   };
-}
-
-async function fetchWithProgress(url, onProgress) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url.split("/").pop()}: HTTP ${r.status}`);
-  const total = +r.headers.get("Content-Length") || 0;
-  const reader = r.body.getReader();
-  const chunks = [];
-  let done = 0;
-  for (;;) {
-    const { value, done: end } = await reader.read();
-    if (end) break;
-    chunks.push(value);
-    done += value.length;
-    onProgress && onProgress(done, total);
-  }
-  const buf = new Uint8Array(done);
-  let o = 0;
-  for (const c of chunks) { buf.set(c, o); o += c.length; }
-  return buf.buffer;
+  worker.onerror = (e) => {
+    setModelState("", "Worker error: " + (e.message || "failed to start"));
+    if (onWorkerMsg) onWorkerMsg({ type: "error", message: e.message || "worker failed" });
+  };
+  return worker;
 }
 
 function setModelState(cls, msg) {
@@ -64,46 +59,22 @@ function setModelState(cls, msg) {
   $("model-msg").textContent = msg;
 }
 
-function ensureModel() {
-  if (pipe) return Promise.resolve();
-  if (loading) return loading;
-  const quality =
-    document.querySelector('input[name="quality"]:checked')?.value || "int8";
-  const MODELS = modelSet(quality);
+function primeDownloadBars(quality) {
+  $("dl-bars").innerHTML = ["encoder", "embedding", "decoder", "ecapa"].map((n) =>
+    `<div>${n}<progress id="pg-${n}" max="100" value="0"></progress></div>`).join("");
   setModelState("loading", `Downloading model (${quality}) — one-time, browser-cached…`);
   $("btn-load").disabled = true;
-  const bars = $("dl-bars");
-  bars.innerHTML = Object.keys(MODELS).map((n) =>
-    `<div>${n}<progress id="pg-${n}" max="100" value="0"></progress></div>`).join("");
-  loading = (async () => {
-    const [cfg, melBin, vocab] = await Promise.all([
-      fetch("models/config.json").then((r) => r.json()),
-      fetch("models/mel.bin").then((r) => r.arrayBuffer()),
-      fetch("models/vocab.json").then((r) => r.json()),
-    ]);
-    const p = new MossPipeline(ort, cfg, melBin, vocab);
-    p.eps = ["wasm"];
-    ort.env.wasm.numThreads = nThreads;
-    // run wasm inference in a worker so the page never freezes and the
-    // heartbeat below reflects real liveness
-    ort.env.wasm.proxy = true;
-    await p.load(MODELS, fetchWithProgress, (name, done, total) => {
-      const pg = $(`pg-${name}`);
-      if (pg && total) pg.value = (100 * done) / total;
-    });
-    pipe = p;
-    bars.innerHTML = "";
-    setModelState("ready",
-      `Model ready · ${quality} · CPU ×${nThreads} · ${WINDOW_S / 60}-min windows`);
-  })().catch((e) => {
-    loading = null;
-    setModelState("", "Load failed: " + e.message);
-    $("btn-load").disabled = false;
-    throw e;
-  });
-  return loading;
 }
-$("btn-load").onclick = () => ensureModel().catch(() => {});
+
+$("btn-load").onclick = () => {
+  const quality =
+    document.querySelector('input[name="quality"]:checked')?.value || "int8";
+  if (workerReady) return;
+  primeDownloadBars(quality);
+  // a bare load: run with an empty tail so the worker just initializes
+  getWorker().postMessage({ type: "run", wav: new Float32Array(16000).buffer,
+                            quality, windowS: WINDOW_S });
+};
 
 /* ============================ transcript view ============================ */
 function fmt(t) {
@@ -321,10 +292,11 @@ $("btn-rec").onclick = async () => {
   }
 };
 
-$("btn-abort").onclick = () => abortCtl && abortCtl.abort();
+$("btn-abort").onclick = () => { aborted = true; if (worker) worker.postMessage({ type: "abort" }); };
 
 /* ---- liveness heartbeat: time since the model last made progress ------- */
 let lastBeat = 0, beatWhat = "", runT0 = 0, hbTimer = null;
+let dlState = null;  // {done,total} while a model file downloads
 function beat(what) { lastBeat = Date.now(); beatWhat = what; }
 function hbStart() {
   runT0 = Date.now();
@@ -335,6 +307,13 @@ function hbStart() {
     const el = (Date.now() - runT0) / 1000;
     const dot = $("hb-dot");
     let note;
+    if (dlState) {
+      dot.className = "";
+      const pct = dlState.total ? ` ${(100 * dlState.done / dlState.total).toFixed(0)}%` : "";
+      $("hb-text").textContent =
+        `${fmt(el)} elapsed · downloading model${pct} (one-time, cached)`;
+      return;
+    }
     if (idle < 8) { dot.className = ""; note = "model active"; }
     else if (idle < 90) {
       dot.className = "warn";
@@ -356,74 +335,75 @@ function hbStop() {
 async function transcribe(wav) {
   if (busy) return;
   busy = true;
-  abortCtl = new AbortController();
+  aborted = false;
   $("btn-abort").style.display = "";
   const secs = wav.length / 16000;
   const nWin = Math.max(1, Math.ceil(secs / WINDOW_S));
   const t0 = Date.now();
   let lastLinked = [];
   hbStart();
-  try {
-    await ensureModel();
-    beat("model loaded");
-    $("status").textContent =
-      `${fmt(secs)} of audio → ${nWin} × ${WINDOW_S / 60}-min window(s)`;
-    $("bar").style.display = "";
-    const finalSegs = await pipe.transcribeMeeting(wav, {
-      windowS: WINDOW_S,
-      signal: abortCtl.signal,
-      onStage: (wi, nw, stage, detail) => {
-        beat(stage === "encode" ? `encoding ${detail}` : "prefill");
-        const what = stage === "encode"
-          ? `listening to the audio (chunk ${detail})`
-          : `reading it into the model (${detail}) — first words follow`;
-        $("status").textContent = `Window ${wi + 1}/${nw} · ${what}…`;
-      },
-      onToken: (wi, nw, text, n, dt) => {
-        beat(`decoding · ${(n / dt).toFixed(1)} tok/s`);
-        const off = wi * WINDOW_S;
-        const { segs: prov, tail } = parseLenientWithTail(text);
+  beat("loading model");
+  const quality =
+    document.querySelector('input[name="quality"]:checked')?.value || "int8";
+  if (!workerReady) primeDownloadBars(quality);
+  $("status").textContent =
+    `${fmt(secs)} of audio → ${nWin} × ${WINDOW_S / 60}-min window(s)`;
+  $("bar").style.display = "";
+
+  const finish = () => {
+    hbStop(); busy = false; onWorkerMsg = null;
+    $("btn-abort").style.display = "none";
+  };
+
+  await new Promise((resolve) => {
+    onWorkerMsg = (m) => {
+      if (m.type === "stage") {
+        dlState = null;
+        beat(m.stage === "encode" ? `encoding ${m.detail}` : "prefill");
+        const what = m.stage === "encode"
+          ? `listening to the audio (chunk ${m.detail})`
+          : `reading it into the model (${m.detail}) — first words follow`;
+        $("status").textContent = `Window ${m.wi + 1}/${m.nw} · ${what}…`;
+      } else if (m.type === "token") {
+        beat(`decoding · ${(m.n / m.dt).toFixed(1)} tok/s`);
+        const off = m.wi * WINDOW_S;
+        const { segs: prov, tail } = parseLenientWithTail(m.text);
         segs = [...lastLinked, ...prov.map((s) => ({
           start: s.start + off, end: s.end + off, speaker: "…", text: s.text,
         }))];
         renderTranscript(tail);
-        $("status").textContent =
-          `Window ${wi + 1}/${nw} · ${(n / dt).toFixed(1)} tok/s`;
-      },
-      onWindow: (linked, done, total) => {
-        beat(`window ${done}/${total} linked`);
-        lastLinked = linked;
-        segs = linked;
-        renderLegend();
-        renderTranscript();
+        $("status").textContent = `Window ${m.wi + 1}/${m.nw} · ${(m.n / m.dt).toFixed(1)} tok/s`;
+      } else if (m.type === "window") {
+        beat(`window ${m.done}/${m.total} linked`);
+        lastLinked = m.linked;
+        segs = m.linked;
+        renderLegend(); renderTranscript();
         const el = (Date.now() - t0) / 1000;
-        const eta = (el / done) * (total - done);
-        $("bar").firstElementChild.style.width = `${(100 * done) / total}%`;
+        const eta = (el / m.done) * (m.total - m.done);
+        $("bar").firstElementChild.style.width = `${(100 * m.done) / m.total}%`;
         $("stats").textContent =
-          `${done}/${total} windows · ${linked.length} segments · ` +
-          `${new Set(linked.map((s) => s.speaker)).size} speakers` +
-          (done < total ? ` · ~${fmt(eta)} left` : "");
-      },
-    });
-    segs = finalSegs;
-    renderLegend();
-    renderTranscript();
-    const el = (Date.now() - t0) / 1000;
-    $("bar").firstElementChild.style.width = "100%";
-    $("status").textContent =
-      abortCtl.signal.aborted ? "Stopped — partial result kept." : "Done · all local.";
-    $("stats").textContent =
-      `${fmt(secs)} audio · ${finalSegs.length} segments · ` +
-      `${new Set(finalSegs.map((s) => s.speaker)).size} speakers · ` +
-      `${fmt(el)} compute (${(secs / el).toFixed(2)}× realtime)`;
-    if (finalSegs.length) offerDownloads(finalSegs);
-  } catch (e) {
-    if (pipe) $("status").textContent = "Inference failed: " + e.message;
-    console.error(e);
-  } finally {
-    hbStop();
-    busy = false;
-    abortCtl = null;
-    $("btn-abort").style.display = "none";
-  }
+          `${m.done}/${m.total} windows · ${m.linked.length} segments · ` +
+          `${new Set(m.linked.map((s) => s.speaker)).size} speakers` +
+          (m.done < m.total ? ` · ~${fmt(eta)} left` : "");
+      } else if (m.type === "done") {
+        segs = m.segs;
+        renderLegend(); renderTranscript();
+        const el = (Date.now() - t0) / 1000;
+        $("bar").firstElementChild.style.width = "100%";
+        $("status").textContent =
+          m.aborted ? "Stopped — partial result kept." : "Done · all local.";
+        $("stats").textContent =
+          `${fmt(secs)} audio · ${m.segs.length} segments · ` +
+          `${new Set(m.segs.map((s) => s.speaker)).size} speakers · ` +
+          `${fmt(el)} compute (${(secs / el).toFixed(2)}× realtime)`;
+        if (m.segs.length) offerDownloads(m.segs);
+        finish(); resolve();
+      } else if (m.type === "error") {
+        $("status").textContent = "Inference failed: " + m.message;
+        finish(); resolve();
+      }
+    };
+    const buf = wav.buffer.slice(0);
+    getWorker().postMessage({ type: "run", wav: buf, quality, windowS: WINDOW_S }, [buf]);
+  });
 }

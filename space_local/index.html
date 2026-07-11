@@ -231,14 +231,20 @@
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
 <script>
-// cross-origin isolation via service worker -> multi-threaded wasm
+// cross-origin isolation via service worker -> multi-threaded wasm (~4x).
+// Proven reload pattern: reload once when the SW takes control so the
+// navigation is re-served with COOP/COEP headers (guarded against loops).
 if ("serviceWorker" in navigator && !window.crossOriginIsolated) {
+  const n = +(sessionStorage.getItem("coiReloads") || 0);
   navigator.serviceWorker.register("coi-sw.js").then((reg) => {
-    if (reg.active && !sessionStorage.getItem("coi-reloaded")) {
-      sessionStorage.setItem("coi-reloaded", "1");
+    if (reg.active && !navigator.serviceWorker.controller && n < 2) {
+      sessionStorage.setItem("coiReloads", n + 1);
       location.reload();
     }
   }).catch(() => {});
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (n < 2) { sessionStorage.setItem("coiReloads", n + 1); location.reload(); }
+  });
 }
 </script>
 <script type="module" src="app.js"></script>
