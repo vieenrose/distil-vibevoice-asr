@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "models/moss_onnx"
+OUT = None  # set from --out in main()
 
 
 class EncoderWrap(torch.nn.Module):
@@ -70,8 +70,11 @@ class DecoderWrap(torch.nn.Module):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="models/moss")
+    ap.add_argument("--out", default="models/moss_onnx")
     ap.add_argument("--parity-only", action="store_true")
     args = ap.parse_args()
+    global OUT
+    OUT = ROOT / args.out
     OUT.mkdir(parents=True, exist_ok=True)
 
     from transformers import AutoModelForCausalLM, AutoProcessor

@@ -26,7 +26,7 @@ import torch
 from torch import nn
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "models/moss_onnx_sherpa"
+OUT = None  # set from --out in main()
 
 
 def rotate_half(x):
@@ -113,9 +113,12 @@ class FixedCacheMossDecoder(nn.Module):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="models/moss")
+    ap.add_argument("--out", default="models/moss_onnx_sherpa")
     ap.add_argument("--max-total-len", type=int, default=8192)
     ap.add_argument("--parity-only", action="store_true")
     args = ap.parse_args()
+    global OUT
+    OUT = ROOT / args.out
     OUT.mkdir(parents=True, exist_ok=True)
 
     from transformers import AutoModelForCausalLM

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zh-TW Transcriber — 100% in your browser</title>
+<style>
+  :root {
+    --bg:#fff; --fg:#1a1a1a; --muted:#767676; --card:#f5f5f7;
+    --accent:#4f46e5; --border:#e2e2e6; --ok:#2aa876; --warn:#c78c2c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#101014; --fg:#e8e8ea; --muted:#9a9aa2; --card:#1a1a22; --border:#2a2a33; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+         background:var(--bg); color:var(--fg); line-height:1.55; }
+  .wrap { max-width:860px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:1.4rem; margin:.2em 0; }
+  .sub { color:var(--muted); font-size:.93rem; }
+  a { color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px;
+          padding:14px 16px; margin:14px 0; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:9px;
+           padding:10px 18px; font-size:1rem; cursor:pointer; margin-right:8px; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.rec { background:#e05563; }
+  progress { width:100%; height:8px; }
+  #status { font-size:.9rem; color:var(--muted); margin:6px 0; min-height:1.2em; }
+  #stats  { font-size:.9rem; color:var(--ok); margin:6px 0; }
+  #transcript { border:1px solid var(--border); border-radius:12px; background:var(--card);
+                min-height:120px; max-height:50vh; overflow-y:auto; padding:10px 14px; }
+  .seg { padding:4px 6px; }
+  .seg .ts { color:var(--muted); font-size:.8rem; margin-right:8px; font-variant-numeric:tabular-nums; }
+  .seg .spk { font-weight:700; margin-right:8px; }
+  .raw { color:var(--muted); font-size:.9rem; white-space:pre-wrap; word-break:break-all; }
+  footer { color:var(--muted); font-size:.8rem; margin-top:24px; }
+  table { border-collapse:collapse; font-size:.85rem; }
+  td,th { border:1px solid var(--border); padding:3px 9px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔒 zh-TW / English speech-to-text — 100% local, in your browser</h1>
+  <p class="sub">
+    <a href="https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw">Luigi/moss-transcribe-diarize-zhtw</a>
+    (0.9B, q4/int8 ONNX) running entirely on <b>your</b> device via
+    <a href="https://onnxruntime.ai/docs/tutorials/web/">onnxruntime-web</a>.
+    No audio ever leaves this page — close the tab, it's gone. Record a short clip
+    (≤ 2 min) or drop a file, and watch the timestamped, speaker-tagged transcript
+    stream out token by token. For hour-long meetings use the
+    <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber-live">ZeroGPU Space</a>
+    or the <a href="https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber">instant viewer</a>.
+  </p>
+
+  <div class="card" id="loader">
+    <b>1 · Load the model</b> — ~840 MB one-time download, cached by your browser.
+    <div id="ep-note" class="sub"></div>
+    <p><button id="btn-load">Download &amp; initialize</button></p>
+    <div id="dl-bars"></div>
+  </div>
+
+  <div class="card">
+    <b>2 · Provide audio</b> (≤ 120 s used)
+    <p>
+      <button id="btn-rec" disabled>● Record</button>
+      <input type="file" id="file-in" accept="audio/*" disabled>
+    </p>
+    <div id="status">Model not loaded yet.</div>
+  </div>
+
+  <div class="card">
+    <b>3 · Transcript</b>
+    <div id="stats"></div>
+    <div id="transcript"><span class="sub">—</span></div>
+  </div>
+
+  <div class="card sub">
+    <b>Accuracy &amp; speed</b> — the q4/int8 graphs measure <b>MER 0.068 vs the full
+    bf16 fine-tune</b> on held-out real meeting audio (Traditional-Chinese output is
+    enforced by the same OpenCC s2tw step the reference pipeline uses).
+    Reference decode speeds: 8–25 tok/s CPU (a 30 s clip ≈ 5–15 s of compute);
+    WebGPU is used automatically when available.
+    <br>The same exported graphs power the
+    <a href="https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize">sherpa-onnx C++ port</a>
+    for phones.
+  </div>
+
+  <footer>
+    Apache-2.0. Model: fine-tune of
+    <a href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS MOSS-Transcribe-Diarize</a>.
+    Transcripts are machine-generated and may contain errors.
+  </footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

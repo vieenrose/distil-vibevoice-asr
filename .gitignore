@@ -54,3 +54,4 @@ vendor/
 vendor/
 space/examples/*.mp3
 space_static/examples/*.mp3
+space_local/models/*.onnx
