@@ -1,13 +1,183 @@
-# distil-vibevoice-asr
+# distil-vibevoice-asr → MOSS-Transcribe-Diarize zh-TW
 
-Prune-and-distill **microsoft/VibeVoice-ASR** (8.7B) → **4B** → **1.5B** for
-**on-device meeting transcription** (6 GB-RAM phone) with **speaker diarization +
-timestamps**, targeting **zh-TW (Traditional Chinese, Taiwan) + English
-code-switched meetings**.
+On-device **zh-TW (Traditional Chinese, Taiwan) / English** meeting
+transcription with **speaker diarization + timestamps**.
 
-This README is the canonical description of the plan. Module APIs are defined by
-the cross-module contract (see `src/distil_vibevoice/`), and hyperparameters live
-in `configs/`.
+> ## ⚠️ Status: the VibeVoice distillation path is DEPRECATED
+>
+> This repo started as a prune-and-distill of **microsoft/VibeVoice-ASR** (8.7B →
+> 1.5B). That work is preserved below (§"Deprecated: VibeVoice-ASR distillation")
+> for the record, but it is **superseded** by fine-tuning
+> **[OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)**
+> (0.9B, Apache-2.0). Why the pivot:
+> - **Quality**: per its paper, MOSS beats VibeVoice-ASR-8.7B on every ASR
+>   benchmark (e.g. AISHELL-4 CER 14.84 vs 21.40; podcast 5.97 vs 27.94).
+> - **Size**: 0.9B natively vs a 1.5B distillation target — smaller *and*
+>   better, no multi-stage prune/distill cascade needed.
+> - **License**: Apache-2.0 (VibeVoice-ASR is research-only).
+> - **Same output contract**: speaker-attributed, timestamped segments in one
+>   pass (`[start][Sxx]text[end]`), which is the product requirement.
+>
+> **Everything published and live is the MOSS adaptation.** The VibeVoice code
+> (`src/distil_vibevoice/{pruning,distill}`, `configs/`) remains importable and
+> its 252 CPU tests pass, but it is not the maintained path.
+
+## Published artifacts (MOSS adaptation)
+
+| What | Where |
+|---|---|
+| Fine-tuned model (v4, default) | [`Luigi/moss-transcribe-diarize-zhtw`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw) |
+| Quantized ONNX graphs (web / mobile / sherpa) | [`Luigi/moss-transcribe-diarize-zhtw-onnx`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-onnx) |
+| Fully-local browser demo | [`Luigi/zh-tw-transcriber-local`](https://huggingface.co/spaces/Luigi/zh-tw-transcriber-local) (HF Space) |
+| Precomputed long-meeting viewer | [`Luigi/zh-tw-meeting-transcriber`](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber) |
+| sherpa-onnx C++ runtime port | [`vieenrose/sherpa-onnx@feature/moss-transcribe-diarize`](https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize) |
+
+---
+
+# MOSS-Transcribe-Diarize zh-TW adaptation (current work)
+
+Base model: **MOSS-Transcribe-Diarize** — Whisper-Medium encoder (80-bin mel,
+4× time-merge, VQ-adaptor) + Qwen3-0.6B decoder; audio token id `151671`,
+12.5 audio-tokens/s; single-pass output stream `[start][Sxx]text[end]`.
+
+## Reproducibility map (numbered scripts)
+
+All scripts are thin CLIs under `scripts/`; run with `.venv/bin/python`. Models
+live in `models/` and data in `data/` (both git-ignored — regenerate via the
+steps below). Held-out eval meetings `15361/15362/15857` are **never** trained on.
+
+| Stage | Script | Produces |
+|---|---|---|
+| **Real data** — collect IVOD | `01b_collect_ivod.py` | `data/raw/ivod_*/` + manifest (robust dead-air skip via `robust_speech_start`) |
+| Fuse real labels | `38_build_ivod_targets.py` | `data/pseudo/ivod_ft_v4.jsonl` — whisperx×pyannote fused, speaker-coverage purity filter (131 mtgs / 55.8 h) |
+| **Synthetic data** — scripts | `dialogue_scripts.py` (12 domains) | code-switched zh-TW/en meeting scripts |
+| TTS meetings | `24_bulk_tts.py` (VibeVoice community fork, `.venv_tts`) | `data/pseudo/tts_all.jsonl` (~3000 mtgs, exact labels) |
+| **Fine-tune** v1/v2 | `27_ft_moss.py` | `models/moss_ft_zhtw{,_v2}` (SFT, CE on assistant tokens) |
+| Fine-tune v3/v4 | `39_ft_moss_v3.py` | `models/moss_ft_zhtw_v4` — 300 s windows, mix 40% clean / 30% RIR+MUSAN-aug / 30% real IVOD |
+| **Eval** synthetic MER | `26_eval_moss.py` | held-out MER/DER |
+| Long-clip gates | `36_dump_moss_outputs.py` → `40_eval_longclip.py` | leakage / tag-drop / DER / consistency at 90/180/300 s |
+| Base-domain regression | `45_regression_base_domains.py` | ASCEND zh/en/mixed MER vs base (guards forgetting) |
+| **Diarization** linking sweep | `34b`/`51_linking_sweep.py` | best cross-window linking config |
+| **On-device** ONNX export | `30_export_moss_onnx.py` (`--last-logits`, `--fp16-kv`), `31_export_moss_qwen3style.py` | web / sherpa decoder graphs (parity-checked) |
+| Web quantization | `41_quantize_web.py`, `44_export_ecapa_onnx.py` | int8 / q4 graphs, ECAPA ONNX (conv-DFT STFT, cosine 1.0000) |
+| QAT + mixed-precision | `48_q4_sensitivity.py` (NAS) → `49_qat_q4.py` → `50_export_q4_mixed.py` | quantization-robust q4 |
+| **Demo build** | `37_build_space_example.py`, `43_dump_web_assets.py` | precomputed examples + browser assets |
+
+## Fine-tuning recipe (v1 → v4)
+
+SFT, cross-entropy on assistant tokens only, bf16, gradient checkpointing,
+cosine LR, single GPU. Target format `[start][Sxx]text[end]`, Traditional text.
+
+| Ver | Change | Held-out MER | Real 123-min DER / consistency |
+|---|---|---|---|
+| base | — | 0.395* | 0.74 / — |
+| v1 | 400 steps @ lr 1e-5 | 0.201 | — |
+| **v2** | +2000 steps @ 5e-6 | **0.183** | 0.180 / — |
+| v3 | 300 s windows + real IVOD (30 %), 3000 steps | 0.18 | 0.244 / 0.814 *(diarization regressed)* |
+| **v4** | v3 data with **speaker-coverage purity filter** (`38`), 2000 steps | ~0.18 | **0.195 / 0.905** *(recovered)* |
+
+\* base-model gap is largely the Simplified↔Traditional script mismatch.
+
+**Key v3→v4 fix**: v3's fused IVOD labels allowed segments spanning speaker
+turns, teaching merged-turn output (consistency 0.912→0.814). A 15 s length cap
+was not viable (median whisperx segment is 18 s → keeps only 15 % of speech);
+instead the winning pyannote speaker must cover ≥70 % of the segment span
+(`38_build_ivod_targets.py`). This dropped exactly the boundary-crossers and
+recovered diarization.
+
+## Evaluation principles
+
+- **Script-normalize before scoring.** MER/CER are computed after converting
+  both hyp and reference to one script (OpenCC), so Traditional-vs-Simplified
+  output is not counted as a recognition error.
+- **Separate repairable from irreparable metrics.** Simplified-script leakage
+  and number formatting are fixed deterministically in post (see below) — they
+  are reported but do **not** gate publication. Recognition (MER), diarization
+  (DER / consistency), timestamps, and base-domain regression (ASCEND) do.
+- **Always check base-domain regression.** Every fine-tune is scored on ASCEND
+  (real zh/en conversational code-switch) vs the base model, so a zh-TW FT can't
+  silently degrade the base model's general ASR.
+
+## Long-meeting diarization
+
+MOSS is single-pass; long audio is processed in windows and speakers are linked
+across them (`src/distil_vibevoice/runtime/`):
+
+1. Transcribe each window (`[start][Sxx]…` labels are only consistent *within* a
+   window).
+2. Embed every segment with **ECAPA-TDNN** (`runtime/embeddings.py`).
+3. One global agglomerative-clustering pass (`runtime/linking.py`: core segments
+   ≥3 s at cosine 0.45 average-linkage, short segments → nearest centroid) gives
+   one consistent speaker set across the whole meeting.
+
+Validated vs pyannote references on real meetings: **DER 0.056** (30-min,
+7/8 speakers), **consistency 0.905** (123-min, 300 s windows). Window size is a
+measured accuracy↔speed tradeoff: 90 s ≈ 180 s on diarization; only 300 s is
+meaningfully better on very long meetings (consistency 0.905 vs 0.87), and the
+180 s→300 s gap is **intrinsic to window context, not linker-fixable**
+(`51_linking_sweep.py` recovers only ~0.003 of the 0.032 gap).
+
+## Written-form post-processing (deterministic, recognition unchanged)
+
+An acoustic model can't reliably learn script choice or number place-value, so
+these are rule modules applied after decoding:
+
+- **`runtime/lenient_parser.py`** — accepts `[start]text[end]` without an
+  `[Sxx]` tag (real far-field audio drops it) and inherits the previous speaker;
+  the strict parser otherwise discards whole windows.
+- **OpenCC `s2tw`** — Simplified→Traditional (pure script conversion; never
+  `s2twp`, which would corrupt proper nouns like 高端疫苗).
+- **`data/itn.py`** — conservative inverse text normalization via `cn2an`
+  (二十三→23, 百分之五十→50%) with idiom guards (千萬, 百分之百, …) and
+  ordinal protection (第八/第一 stay words). A JS port (`space_local/itn.js`) is
+  differential-tested byte-identical.
+
+## On-device: ONNX, quantization, QAT
+
+- **Export** (`30`, `31`): 3-graph web layout (encoder / embedding / decoder
+  with dynamic KV) and sherpa fixed-KV layout; `--last-logits` (lm_head on the
+  final position only — the full-prefill logits are a ~1.4 GB tensor in 32-bit
+  wasm), optional `--fp16-kv`. All parity-checked vs PyTorch.
+- **Quantization** (`41`, `44`): encoder int8 (MatMul-only — `ConvInteger`
+  unsupported in ORT CPU/web), embedding int8, decoder int8 / q4 (MatMulNBits
+  block-32 symmetric); ECAPA exported with a conv1d-DFT replacing `torch.stft`
+  (parity cosine 1.0000).
+- **Accuracy (script-normalized MER vs bf16 FT)**: int8 **0.03–0.04**; naive q4
+  0.068; **QAT-q4 0.077→ near int8** after quantization-aware fine-tuning.
+- **QAT + NAS** (`48`/`49`/`50`): STE int4 fake-quant matching MatMulNBits
+  (`src/distil_vibevoice/quant/fakequant.py`); a layer sensitivity probe (the
+  "NAS" — last layer + lm_head are most q4-sensitive) informs a mixed-precision
+  export. **int8 is the shipped choice** (q4 saved only ~19 % of download for a
+  real accuracy hit; accuracy is the priority).
+
+## Browser demo (`space_local/`)
+
+Fully-local: int8 ONNX + `onnxruntime-web` in a **Web Worker** (page never
+freezes), any-length windowed audio + ECAPA linking, streaming transcript with
+a liveness heartbeat, s2tw + ITN, SRT/JSON export. Weights and example media are
+served from the ONNX model repo (HF Space storage is code-only). CPU-only —
+WebGPU was dropped; cross-origin isolation for wasm threads via a COI service
+worker. `space_local/pipeline.js` is the reference JS pipeline (env-agnostic;
+node-validated against the Python sim `42_web_pipeline_sim.py`).
+
+## sherpa-onnx C++ port
+
+The native runtime lives in the fork branch above: MOSS-SATS offline recognizer
+(adapted from the qwen3-asr impl), a character-state-machine SATS parser
+(differential-tested byte-exact vs the Python reference), windowed decoding
+(`--moss-sats-window-seconds`, default 300 — single-pass degenerates beyond
+~4–5 min), int8 graphs. A native phone app / WASM demo is a **separate future
+project**.
+
+---
+
+# Deprecated: VibeVoice-ASR distillation
+
+*(Original plan, kept for the record. Superseded by the MOSS adaptation above.)*
+
+This README section is the canonical description of the (deprecated) distillation
+plan. Module APIs are defined by the cross-module contract (see
+`src/distil_vibevoice/`), and hyperparameters live in `configs/`.
 
 ---
 
