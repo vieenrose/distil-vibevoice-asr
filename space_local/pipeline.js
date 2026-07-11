@@ -33,6 +33,7 @@ export class MossPipeline {
       }
     }
     this.sessions = {};
+    this.kvDtype = cfg.kv_dtype || "float32";
   }
 
   async load(urls, fetchFn, onProgress) {
@@ -150,9 +151,10 @@ export class MossPipeline {
       inputs_embeds: new this.ort.Tensor("float32", embs, [1, ids.length, dim]),
       attention_mask: onesMask(this.ort, ids.length),
     };
+    const emptyBuf = this.kvDtype === "float16"
+      ? new Uint16Array(0) : new Float32Array(0);
     for (let i = 0; i < n_layers; i++) {
-      const empty = new this.ort.Tensor(
-        "float32", new Float32Array(0), [1, kv_heads, 0, head_dim]);
+      const empty = new this.ort.Tensor(this.kvDtype, emptyBuf, [1, kv_heads, 0, head_dim]);
       feeds[`past_k_${i}`] = empty;
       feeds[`past_v_${i}`] = empty;
     }

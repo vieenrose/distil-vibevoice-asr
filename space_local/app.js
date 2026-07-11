@@ -15,7 +15,13 @@ const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
                  "#8884d8", "#c05780", "#4a9d5f", "#b8860b", "#7b68ee",
                  "#20a4b5", "#cc6699", "#899a20"];
 
-const WINDOW_S = 180;  // CPU-only; 180 s windows validated (DER ~= 300 s)
+// iOS Safari caps tab memory ~1.3-1.5GB; the mobile model set (q4 + fp16 KV)
+// plus a shorter window fits. Detect and default accordingly.
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.platform) ||
+  (navigator.userAgent.includes("Mac") && "ontouchend" in document) ||
+  /iPhone|iPad/.test(navigator.userAgent);
+const LOW_MEM = (navigator.deviceMemory && navigator.deviceMemory <= 4) || IS_IOS;
+const WINDOW_S = LOW_MEM ? 90 : 180;
 let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
 let s2tw = (t) => t;
@@ -23,8 +29,14 @@ try {
   if (window.OpenCC) s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
 } catch (e) { console.warn("opencc unavailable", e); }
 
-$("input-note").textContent =
-  "CPU-only · runs in a background worker (page stays responsive)";
+$("input-note").textContent = LOW_MEM
+  ? "CPU-only · phone mode (q4 + fp16 KV, 1.5-min windows to fit Safari memory)"
+  : "CPU-only · runs in a background worker (page stays responsive)";
+// preselect the phone-friendly model on memory-limited devices
+if (LOW_MEM) {
+  const r = document.querySelector('input[name="quality"][value="mobile"]');
+  if (r) r.checked = true;
+}
 
 /* ============================ inference worker ============================ */
 let worker = null, workerReady = false, onWorkerMsg = null;

@@ -147,8 +147,9 @@
     <div id="model-strip">
       <span id="model-state"><span class="dot"></span><span id="model-msg">Not loaded — starts automatically when needed</span></span>
       <span id="quality">
-        <label><input type="radio" name="quality" value="int8" checked> high accuracy (~1.15 GB)</label>
+        <label><input type="radio" name="quality" value="int8" checked> high accuracy (~1.15 GB, desktop)</label>
         <label style="margin-left:10px"><input type="radio" name="quality" value="q4"> compact (~0.93 GB)</label>
+        <label style="margin-left:10px"><input type="radio" name="quality" value="mobile"> 📱 phone (~0.8 GB + fp16 KV, fits iOS Safari)</label>
       </span>
       <button id="btn-load" class="ghost">Load now</button>
     </div>

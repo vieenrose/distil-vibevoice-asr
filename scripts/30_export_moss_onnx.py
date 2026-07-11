@@ -49,6 +49,7 @@ class DecoderWrap(torch.nn.Module):
         self.lm_head = moss.lm_head
         self.n_layers = moss.config.text_config.num_hidden_layers
         self.last_logits = False
+        self.fp16_kv = False
 
     def forward(self, inputs_embeds, attention_mask, *flat_past):
         from transformers.cache_utils import DynamicCache
@@ -56,7 +57,10 @@ class DecoderWrap(torch.nn.Module):
         if len(flat_past) and flat_past[0].shape[2] > 0:
             past = DynamicCache()
             for i in range(self.n_layers):
-                past.update(flat_past[2 * i], flat_past[2 * i + 1], i)
+                k, v = flat_past[2 * i], flat_past[2 * i + 1]
+                if self.fp16_kv:
+                    k, v = k.float(), v.float()
+                past.update(k, v, i)
         out = self.lm(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
                       past_key_values=past, use_cache=True, return_dict=True)
         hidden = out.last_hidden_state
@@ -67,7 +71,10 @@ class DecoderWrap(torch.nn.Module):
         present = []
         for i in range(self.n_layers):
             layer = pkv.layers[i]
-            present += [layer.keys, layer.values]
+            k, v = layer.keys, layer.values
+            if self.fp16_kv:
+                k, v = k.half(), v.half()
+            present += [k, v]
         return (logits, *present)
 
 
@@ -75,6 +82,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="models/moss")
     ap.add_argument("--out", default="models/moss_onnx")
+    ap.add_argument("--fp16-kv", action="store_true",
+                    help="decoder KV cache I/O in fp16 (halves the dominant "
+                         "runtime memory cost; attention still computes in fp32)")
     ap.add_argument("--last-logits", action="store_true",
                     help="decoder emits logits for the LAST position only "
                          "(saves a huge lm_head pass + a (S,vocab) tensor at "
@@ -100,6 +110,7 @@ def main() -> int:
     enc = EncoderWrap(moss).eval()
     dec = DecoderWrap(moss).eval()
     dec.last_logits = bool(args.last_logits)
+    dec.fp16_kv = bool(args.fp16_kv)
     emb = moss.model.language_model.embed_tokens
 
     mel = torch.randn(1, moss.config.audio_config.num_mel_bins, 3000)  # 30s window
@@ -121,7 +132,9 @@ def main() -> int:
         S, P = 4, 8  # trace WITH non-empty past so cache inputs survive tracing
         ie = torch.randn(1, S, hidden)
         am = torch.ones(1, P + S, dtype=torch.long)
-        past = [torch.randn(1, n_kv, P, head_dim) for _ in range(2 * n_layers)]
+        _kv_dtype = torch.float16 if args.fp16_kv else torch.float32
+        past = [torch.randn(1, n_kv, P, head_dim, dtype=_kv_dtype)
+                for _ in range(2 * n_layers)]
         in_names = ["inputs_embeds", "attention_mask"] + [f"past_{t}_{i}" for i in range(n_layers) for t in ("k", "v")]
         out_names = ["logits"] + [f"present_{t}_{i}" for i in range(n_layers) for t in ("k", "v")]
         dyn = {"inputs_embeds": {0: "B", 1: "S"}, "attention_mask": {0: "B", 1: "S_total"},
