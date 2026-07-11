@@ -11,6 +11,7 @@ precompute need, so clustering methods/thresholds can be swept offline:
 """
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import time
@@ -31,7 +32,7 @@ WINDOWS = [300.0, 600.0]
 SINGLE_PASS_MAX_MIN = 35.0
 
 
-def moss_transcribe(model, proc, wav, dev, prompt):
+def moss_transcribe(model, proc, wav, dev, prompt, raw_sink=None):
     messages = [{"role": "user", "content": [
         {"type": "audio", "audio": "x.wav"},
         {"type": "text", "text": prompt}]}]
@@ -42,6 +43,8 @@ def moss_transcribe(model, proc, wav, dev, prompt):
         out = model.generate(**inputs, max_new_tokens=4096, do_sample=False)
     gen = proc.decode(out[0][inputs["input_ids"].shape[1]:],
                       skip_special_tokens=True)
+    if raw_sink is not None:
+        raw_sink.append(gen)
     return parse_transcript_lenient(gen)
 
 
@@ -50,9 +53,14 @@ def main() -> int:
     from transformers import AutoModelForCausalLM, AutoProcessor
     from moss_transcribe_diarize.inference_utils import DEFAULT_PROMPT
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="models/moss_ft_zhtw_v2")
+    ap.add_argument("--out", default=str(OUT))
+    args = ap.parse_args()
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
     dev = torch.device("cuda:0")
-    mdl = str(ROOT / "models/moss_ft_zhtw_v2")
+    mdl = str(ROOT / args.model)
     model = AutoModelForCausalLM.from_pretrained(
         mdl, trust_remote_code=True, dtype="auto").to(torch.bfloat16).to(dev).eval()
     proc = AutoProcessor.from_pretrained(mdl, trust_remote_code=True)
@@ -96,12 +104,14 @@ def main() -> int:
         for win_s in WINDOWS:
             t0 = time.time()
             out_segs = []
+            raws: list[str] = []
             n_win = 0
             for off in np.arange(0.0, dur, win_s):
                 piece = wav[int(off * tgt_sr): int(min(off + win_s, dur) * tgt_sr)]
                 if len(piece) < tgt_sr * 2:
                     continue
-                for s in moss_transcribe(model, proc, piece, dev, DEFAULT_PROMPT):
+                for s in moss_transcribe(model, proc, piece, dev, DEFAULT_PROMPT,
+                                         raw_sink=raws):
                     end = min(s.end, len(piece) / tgt_sr + 1.0)
                     idx = len(out_segs)
                     out_segs.append({"start": round(off + s.start, 2),
@@ -116,11 +126,12 @@ def main() -> int:
             print(f"  chunked@{int(win_s)}s: {n_win} win, {len(out_segs)} segs "
                   f"({time.time()-t0:.0f}s)", flush=True)
             dump["chunked"][str(int(win_s))] = out_segs
+            dump.setdefault("raw", {})[str(int(win_s))] = raws
 
-        (OUT / f"{stem}.json").write_text(
+        (out_dir / f"{stem}.json").write_text(
             json.dumps(dump, ensure_ascii=False), encoding="utf-8")
-        np.savez_compressed(OUT / f"{stem}.npz", **embs)
-        print(f"  dumped -> {OUT}/{stem}.json/.npz", flush=True)
+        np.savez_compressed(out_dir / f"{stem}.npz", **embs)
+        print(f"  dumped -> {out_dir}/{stem}.json/.npz", flush=True)
     return 0
 
 

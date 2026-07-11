@@ -262,6 +262,38 @@ def load_cached(name: str) -> list[dict] | None:
 
 
 # --------------------------------------------------------------------------- #
+# precomputed hour-long examples: NEVER routed through gr.Audio (the server
+# would decode the multi-hour file and OOM the container); the browser streams
+# the mp3 directly via gradio's file route (range requests -> seeking works)
+# --------------------------------------------------------------------------- #
+EXAMPLE_MEETINGS = [
+    {"stem": "ivod_2024_15857",
+     "label": "交通委員會全體委員會議 — 2 hr 3 min · 35 speakers (2024-04-25)"},
+    {"stem": "ivod_2024_15362",
+     "label": "全院委員談話會 — 5 min · 3 speakers (2024-01-08)"},
+]
+EXAMPLE_MEETINGS = [e for e in EXAMPLE_MEETINGS
+                    if (EXAMPLES_DIR / f"{e['stem']}.json").exists()]
+
+
+def load_example(label: str):
+    stem = next((e["stem"] for e in EXAMPLE_MEETINGS if e["label"] == label),
+                None)
+    if stem is None:
+        return "<i>Unknown example.</i>", "", None, None
+    segs = load_cached(stem + ".mp3")
+    srt, js = export_files(segs, stem)
+    dur = max(s["end"] for s in segs)
+    n_spk = len({s["speaker"] for s in segs})
+    stats = (f"**{fmt_ts(dur)}** of audio · **{len(segs)}** segments · "
+             f"**{n_spk}** speakers · ⚡ precomputed offline with this exact "
+             f"pipeline (no GPU quota used)")
+    player = (f'<audio controls preload="none" style="width:100%" '
+              f'src="/gradio_api/file={EXAMPLES_DIR}/{stem}.mp3"></audio>')
+    return player + render_html(segs, done=True), stats, srt, js
+
+
+# --------------------------------------------------------------------------- #
 # handler
 # --------------------------------------------------------------------------- #
 def run(audio_path: str | None, max_minutes: float,
@@ -368,15 +400,6 @@ Model + pipeline: fine-tune and long-form chunking design from the
 """
 
 
-def build_examples() -> list[list]:
-    rows = []
-    if EXAMPLES_DIR.exists():
-        for p in sorted(EXAMPLES_DIR.glob("*")):
-            if p.suffix.lower() in (".mp3", ".wav", ".flac", ".m4a", ".ogg"):
-                rows.append([str(p), 0])
-    return rows
-
-
 with gr.Blocks(title="zh-TW Meeting Transcriber") as demo:
     gr.Markdown(DESCRIPTION)
     with gr.Row():
@@ -389,11 +412,12 @@ with gr.Blocks(title="zh-TW Meeting Transcriber") as demo:
                 info="Live GPU runs cost quota (~30 s GPU per 5 min of audio); "
                      "examples at 0 use precomputed results.")
             btn = gr.Button("Transcribe", variant="primary")
-            ex = build_examples()
-            if ex:
-                gr.Examples(examples=ex, inputs=[audio_in, max_min],
-                            cache_examples=False,
-                            label="Real 2+ hour meetings (precomputed)")
+            gr.Markdown("### Real long-meeting examples (precomputed — instant)")
+            ex_radio = gr.Radio(
+                choices=[e["label"] for e in EXAMPLE_MEETINGS],
+                label="立法院 IVOD meetings (CC-BY-4.0)",
+                info="Results show instantly; audio streams in the player "
+                     "above the transcript.")
         with gr.Column(scale=2):
             stats_out = gr.Markdown()
             html_out = gr.HTML()
@@ -403,6 +427,8 @@ with gr.Blocks(title="zh-TW Meeting Transcriber") as demo:
     gr.Markdown(FOOTER)
     btn.click(run, inputs=[audio_in, max_min],
               outputs=[html_out, stats_out, srt_out, json_out])
+    ex_radio.change(load_example, inputs=[ex_radio],
+                    outputs=[html_out, stats_out, srt_out, json_out])
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(allowed_paths=[str(EXAMPLES_DIR)])
