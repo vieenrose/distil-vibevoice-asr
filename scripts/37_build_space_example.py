@@ -22,6 +22,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stem", default="ivod_2024_15857")
     ap.add_argument("--window", default="300")
+    ap.add_argument("--dump", default="data/chunk_dump")
     args = ap.parse_args()
 
     # far-field/out-of-domain windows can flip the whole window to Simplified
@@ -30,9 +31,9 @@ def main() -> int:
     from opencc import OpenCC
     cc = OpenCC("s2tw")
 
-    d = json.loads((ROOT / f"data/chunk_dump/{args.stem}.json").read_text(
+    d = json.loads((ROOT / f"{args.dump}/{args.stem}.json").read_text(
         encoding="utf-8"))
-    embs_all = dict(np.load(ROOT / f"data/chunk_dump/{args.stem}.npz"))
+    embs_all = dict(np.load(ROOT / f"{args.dump}/{args.stem}.npz"))
     segs = d["chunked"][args.window]
     embs = {int(k.split("/", 1)[1]): v for k, v in embs_all.items()
             if k.startswith(args.window + "/")}

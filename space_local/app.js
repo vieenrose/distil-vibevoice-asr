@@ -2,6 +2,7 @@
  * Examples render instantly from precomputed JSON; user audio runs through
  * the in-browser pipeline (pipeline.js) with token-level streaming. */
 import { parseLenientWithTail } from "./pipeline.js";
+import { itn } from "./itn.js";
 
 const ort = window.ort;
 const $ = (id) => document.getElementById(id);
@@ -24,10 +25,12 @@ const LOW_MEM = (navigator.deviceMemory && navigator.deviceMemory <= 4) || IS_IO
 const WINDOW_S = LOW_MEM ? 90 : 180;
 let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
-let s2tw = (t) => t;
+let _s2tw = (t) => t;
 try {
-  if (window.OpenCC) s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
+  if (window.OpenCC) _s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
 } catch (e) { console.warn("opencc unavailable", e); }
+// written-form post-processing: Traditional script (s2tw) then number ITN
+const s2tw = (t) => itn(_s2tw(t));
 
 $("input-note").textContent = LOW_MEM
   ? "CPU-only · phone mode (q4 + fp16 KV, 1.5-min windows to fit Safari memory)"
