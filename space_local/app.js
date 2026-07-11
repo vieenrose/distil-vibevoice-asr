@@ -23,7 +23,7 @@ const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
 // speed (longer = larger KV cache = slower tail). User-selectable; 90s ~= 180s
 // on accuracy, 300s squeezes out ~0.03 consistency at the cost of speed.
 function currentWindowS() {
-  return +(document.querySelector('input[name="win"]:checked')?.value || 90);
+  return +(document.querySelector('input[name="win"]:checked')?.value || 180);
 }
 let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
