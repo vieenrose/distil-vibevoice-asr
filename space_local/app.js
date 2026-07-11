@@ -18,10 +18,13 @@ const PALETTE = ["#4f7cff", "#e05563", "#2aa876", "#c78c2c", "#9761d8",
 
 // iOS Safari caps tab memory ~1.3-1.5GB; the mobile model set (q4 + fp16 KV)
 // plus a shorter window fits. Detect and default accordingly.
-// 90 s windows everywhere: bounds the KV cache so decode never crawls on a
-// window's tail (the "hangs mid-window" symptom of longer windows), and links
-// speakers more often for steadier streaming. Validated DER ~= 300 s.
-const WINDOW_S = 90;
+// Window size trades diarization consistency (longer = better on very long
+// meetings: 90s cons 0.874, 300s 0.905 on a 123-min meeting) against decode
+// speed (longer = larger KV cache = slower tail). User-selectable; 90s ~= 180s
+// on accuracy, 300s squeezes out ~0.03 consistency at the cost of speed.
+function currentWindowS() {
+  return +(document.querySelector('input[name="win"]:checked')?.value || 90);
+}
 let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
 let _s2tw = (t) => t;
@@ -32,7 +35,7 @@ try {
 const s2tw = (t) => itn(_s2tw(t));
 
 $("input-note").textContent =
-  "CPU-only · runs in a background worker · 1.5-min windows";
+  "CPU-only · runs in a background worker";
 
 /* ============================ inference worker ============================ */
 let worker = null, workerReady = false, onWorkerMsg = null;
@@ -54,7 +57,7 @@ function getWorker() {
       workerReady = true;
       $("dl-bars").innerHTML = "";
       setModelState("ready",
-        `Model ready · CPU ×${m.threads} · ${WINDOW_S / 60}-min windows`);
+        `Model ready · CPU ×${m.threads}`);
     }
     if (onWorkerMsg) onWorkerMsg(m);
   };
@@ -79,12 +82,12 @@ function primeDownloadBars(quality) {
 
 $("btn-load").onclick = () => {
   const quality =
-    document.querySelector('input[name="quality"]:checked')?.value || "int8";
+    document.querySelector('input[name="quality"]:checked')?.value || "qat";
   if (workerReady) return;
   primeDownloadBars(quality);
   // a bare load: run with an empty tail so the worker just initializes
   getWorker().postMessage({ type: "run", wav: new Float32Array(16000).buffer,
-                            quality, windowS: WINDOW_S });
+                            quality, windowS: currentWindowS() });
 };
 
 /* ============================ transcript view ============================ */
@@ -351,13 +354,14 @@ async function transcribe(wav) {
   aborted = false;
   $("btn-abort").style.display = "";
   const secs = wav.length / 16000;
+  const WINDOW_S = currentWindowS();
   const nWin = Math.max(1, Math.ceil(secs / WINDOW_S));
   const t0 = Date.now();
   let lastLinked = [];
   hbStart();
   beat("loading model");
   const quality =
-    document.querySelector('input[name="quality"]:checked')?.value || "int8";
+    document.querySelector('input[name="quality"]:checked')?.value || "qat";
   if (!workerReady) primeDownloadBars(quality);
   $("status").textContent =
     `${fmt(secs)} of audio → ${nWin} × ${WINDOW_S / 60}-min window(s)`;

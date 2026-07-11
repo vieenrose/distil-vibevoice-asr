@@ -147,9 +147,15 @@
     <div id="model-strip">
       <span id="model-state"><span class="dot"></span><span id="model-msg">Not loaded — starts automatically when needed</span></span>
       <span id="quality">
-        <label><input type="radio" name="quality" value="qat" checked> ⚡ default — QAT q4 + fp16 KV (~0.93 GB, int8-quality, fastest)</label>
+        <label><input type="radio" name="quality" value="qat" checked> ⚡ QAT q4 + fp16 KV (~0.93 GB, int8-quality)</label>
         <label style="margin-left:10px"><input type="radio" name="quality" value="int8"> max fidelity (int8, ~1.15 GB)</label>
       </span>
+      <div style="margin-top:8px;font-size:.85rem">
+        Speaker linking window:
+        <label><input type="radio" name="win" value="90" checked> Fast 1.5 min</label>
+        <label style="margin-left:8px"><input type="radio" name="win" value="180"> Balanced 3 min</label>
+        <label style="margin-left:8px"><input type="radio" name="win" value="300"> Best 5 min (slower, best on 2 h+ meetings)</label>
+      </div>
       <button id="btn-load" class="ghost">Load now</button>
     </div>
     <div id="dl-bars"></div>
