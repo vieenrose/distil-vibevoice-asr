@@ -53,7 +53,7 @@ async function ensureModel(quality) {
     fetch("models/vocab.json").then((r) => r.json()),
   ]);
   const p = new MossPipeline(ort, cfg, melBin, vocab);
-  if (!accuracy) p.kvDtype = "float16";  // qat decoder has fp16 KV I/O
+  // all web decoders use fp32 KV (onnxruntime-web lacks Float16Array support)
   p.eps = ["wasm"];
   await p.load(models, fetchProgress,
     (name, done, total) => post("dl", { name, done, total }));

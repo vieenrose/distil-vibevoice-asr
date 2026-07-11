@@ -151,10 +151,14 @@ export class MossPipeline {
       inputs_embeds: new this.ort.Tensor("float32", embs, [1, ids.length, dim]),
       attention_mask: onesMask(this.ort, ids.length),
     };
-    const emptyBuf = this.kvDtype === "float16"
-      ? new Uint16Array(0) : new Float32Array(0);
+    // fp16 KV only when the runtime has real Float16Array support (node does,
+    // many browsers' onnxruntime-web builds do not — they demand a Float16Array
+    // for float16 tensors). Otherwise use fp32 KV to avoid a hard crash.
+    const useF16 = this.kvDtype === "float16" && typeof Float16Array !== "undefined";
+    const kvType = useF16 ? "float16" : "float32";
+    const emptyBuf = useF16 ? new Float16Array(0) : new Float32Array(0);
     for (let i = 0; i < n_layers; i++) {
-      const empty = new this.ort.Tensor(this.kvDtype, emptyBuf, [1, kv_heads, 0, head_dim]);
+      const empty = new this.ort.Tensor(kvType, emptyBuf, [1, kv_heads, 0, head_dim]);
       feeds[`past_k_${i}`] = empty;
       feeds[`past_v_${i}`] = empty;
     }
