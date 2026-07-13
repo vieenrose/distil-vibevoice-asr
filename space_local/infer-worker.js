@@ -21,7 +21,10 @@ const post = (type, payload) => self.postMessage({ type, ...payload });
 // immutable per deployed filename, so a plain cache-first strategy is safe;
 // bump MODEL_CACHE's suffix if a future deploy ever reuses a filename for
 // different content.
-const MODEL_CACHE = "moss-model-cache-v1";
+// v2: v5 reuses the same filenames (encoder.int8 / embedding.int8 / decoder.q4)
+// with DIFFERENT weights than v4, so bump the suffix to force returning users
+// to fetch the new v5 weights instead of serving stale v4 from cache.
+const MODEL_CACHE = "moss-model-cache-v2";
 
 // Without this, the ~1.1GB model cache lives in "best-effort" storage that
 // the browser is free to silently evict under disk pressure (most
