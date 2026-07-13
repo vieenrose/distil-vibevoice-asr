@@ -12,6 +12,13 @@
  *   parseLenient()    [start][Sxx]text[end] segments, tag-drop tolerant
  */
 
+// Resolve on the next macrotask turn (setTimeout, NOT a microtask/Promise
+// resolve) so a dedicated worker running this pipeline actually returns to
+// its event loop and can deliver a pending postMessage — notably the "abort"
+// message behind the Stop button. In node (offline tests) this is just a
+// negligible tick between decode steps.
+const yieldToLoop = () => new Promise((r) => setTimeout(r));
+
 export class MossPipeline {
   constructor(ort, cfg, melBin, vocab) {
     this.ort = ort;
@@ -104,7 +111,7 @@ export class MossPipeline {
     return mel; // [80 * 3000]
   }
 
-  async encodeAudio(wav /* Float32Array 16 kHz mono */, onStage = null) {
+  async encodeAudio(wav /* Float32Array 16 kHz mono */, onStage = null, signal = null) {
     const { sr, hop, n_mel, chunk_frames } = this.cfg;
     const chunkSamples = sr * 30;
     const nChunks = Math.ceil(wav.length / chunkSamples);
@@ -112,6 +119,8 @@ export class MossPipeline {
     let total = 0;
     let ci = 0;
     for (let off = 0; off < wav.length; off += chunkSamples) {
+      if (signal && signal.aborted) break;
+      await yieldToLoop(); // let a pending "abort" message reach the worker
       if (onStage) onStage("encode", `${++ci}/${nChunks}`);
       const piece = wav.subarray(off, Math.min(off + chunkSamples, wav.length));
       const nFrames = Math.floor(piece.length / hop);
@@ -160,7 +169,8 @@ export class MossPipeline {
     }
     const { prefix_ids, suffix_ids, audio_pad_id, eos_id,
             n_layers, kv_heads, head_dim } = this.cfg;
-    const audio = await this.encodeAudio(wav, onStage);
+    const audio = await this.encodeAudio(wav, onStage, signal);
+    if (signal && signal.aborted) return { text: "", nTokens: 0, seconds: 0 };
     if (onStage) onStage("prefill", `${audio.count + 90} tokens`);
     const ids = [...prefix_ids,
                  ...new Array(audio.count).fill(audio_pad_id),
@@ -206,6 +216,13 @@ export class MossPipeline {
       toks.push(best);
       text = this.decodeTokens(toks);
       if (onToken) onToken(text, toks.length, (Date.now() - t0) / 1000);
+      // Yield a macrotask turn every step. onnxruntime-web's wasm run() blocks
+      // the worker's event loop, so the dedicated worker never gets to process
+      // a postMessage({type:"abort"}) sent from the main thread until this
+      // whole loop finishes — which made the Stop button appear to do nothing
+      // on long transcriptions. This lets the abort message actually land, so
+      // the signal.aborted check at the top of the loop can break out.
+      await yieldToLoop();
       const curLen = outs.present_k_0.dims[2];
       const e = await this.embed([best]);
       feeds = {
