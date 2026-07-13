@@ -143,6 +143,21 @@ export class MossPipeline {
   /* ---- greedy generate with streaming callback -------------------------- */
   async generate(wav, { maxNew = 1024, onToken = null, signal = null,
                         onStage = null } = {}) {
+    // Audio with ~zero energy throughout the whole window is out-of-
+    // distribution for this decoder: measured on real audio, it hallucinates
+    // canned chat-assistant boilerplate ("I'm sorry, I can't assist with
+    // that request.") instead of recognizing "no speech" — reproduced with
+    // pure digital silence (e.g. the warm-up call below) and with synthetic
+    // near-zero noise. Real recordings never hit this floor even in their
+    // quietest room-tone stretches (measured RMS ~3e-3 on a real meeting
+    // clip vs. this 1e-3 threshold), and windows that mix silence with real
+    // speech decode correctly on their own — so skipping the decoder
+    // entirely here only short-circuits genuinely speech-free windows.
+    let sumSq = 0;
+    for (let i = 0; i < wav.length; i++) sumSq += wav[i] * wav[i];
+    if (Math.sqrt(sumSq / wav.length) < 1e-3) {
+      return { text: "", nTokens: 0, seconds: 0 };
+    }
     const { prefix_ids, suffix_ids, audio_pad_id, eos_id,
             n_layers, kv_heads, head_dim } = this.cfg;
     const audio = await this.encodeAudio(wav, onStage);

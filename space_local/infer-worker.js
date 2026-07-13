@@ -23,6 +23,16 @@ const post = (type, payload) => self.postMessage({ type, ...payload });
 // different content.
 const MODEL_CACHE = "moss-model-cache-v1";
 
+// Without this, the ~1.1GB model cache lives in "best-effort" storage that
+// the browser is free to silently evict under disk pressure (most
+// aggressively on mobile / low-disk-space machines) — which looks exactly
+// like "caching doesn't work, it redownloads every time" even though the
+// Cache Storage writes above all succeeded. Requesting "persistent" mode
+// makes eviction require explicit user action instead. Best-effort only:
+// some browsers grant it silently, some prompt, Safari mostly ignores it —
+// either way this never blocks or fails the actual caching path.
+navigator.storage?.persist?.().catch(() => {});
+
 // Stream into a SINGLE pre-sized buffer (Content-Length known ahead of time)
 // instead of collecting chunks in a JS array and copying once at the end —
 // the collect-then-copy pattern briefly doubles peak memory for large files
