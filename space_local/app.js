@@ -340,7 +340,14 @@ document.querySelectorAll("[data-ex]").forEach((btn) => {
 // crashing the tab.
 const CHUNK_S = 20;              // seconds of source audio decoded per WAV chunk
 const MP3_CHUNK_BYTES = 2097152; // ~2 min @ 128kbps per MP3 chunk
-const GENERIC_DECODE_MAX_S = 3 * 3600; // safety net for formats we can't chunk
+// Safety net for formats we can't chunk (m4a/ogg/webm/flac/...): a single
+// decodeAudioData() call needs roughly duration * sampleRate * channels * 4
+// bytes for the native buffer alone, and a 2h 44.1kHz stereo file (~2.5GB)
+// was confirmed to crash the tab outright. 40 min keeps worst-realistic-case
+// (48kHz stereo) well under ~1GB for that one buffer, leaving headroom for
+// everything else already resident (model weights, the resampled output,
+// the app itself) — a much smaller margin than this cap previously allowed.
+const GENERIC_DECODE_MAX_S = 40 * 60;
 
 function probeDuration(blob) {
   return new Promise((resolve, reject) => {
