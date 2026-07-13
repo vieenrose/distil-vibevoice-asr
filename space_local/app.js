@@ -475,9 +475,10 @@ async function blobTo16k(blob, maxS = 0) {
   if (!wav) {
     if (durationS > GENERIC_DECODE_MAX_S) {
       throw new Error(
-        `This file is ${(durationS / 3600).toFixed(1)}h long in a format this app can't load in ` +
-        `pieces (${blob.type || "unknown type"}) — very long files like this can crash the browser ` +
-        `tab. Please convert it to WAV or MP3, or split it into shorter parts.`);
+        `This file is ${(durationS / 3600).toFixed(1)}h long in a format this app can only load ` +
+        `all at once (${blob.type || "unknown type"}), and a file this long could crash the ` +
+        `browser tab. WAV and MP3 don't have this limit — convert it first, e.g.: ` +
+        `ffmpeg -i input.m4a -c:a pcm_s16le output.wav`);
     }
     const arr = await blob.arrayBuffer();
     const ac = new AudioContext();
