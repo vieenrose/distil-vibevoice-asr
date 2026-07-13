@@ -56,7 +56,9 @@
     text-align:center; color:var(--muted); cursor:pointer;
     transition:border-color .15s, background .15s; }
   #drop.hover { border-color:var(--accent); background:var(--chip); }
+  #drop.disabled { opacity:.45; cursor:default; pointer-events:none; }
   #drop b { color:var(--fg); }
+  .chip:disabled { opacity:.4; cursor:default; }
   .inrow { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; align-items:center; }
   button { border:none; border-radius:10px; padding:10px 18px; font-size:.95rem;
     cursor:pointer; background:var(--accent); color:#fff; font-weight:500; }

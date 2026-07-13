@@ -37,9 +37,18 @@ export class MossPipeline {
   }
 
   async load(urls, fetchFn, onProgress) {
-    for (const [name, url] of Object.entries(urls)) {
-      const buf = await fetchFn(url, (done, total) =>
-        onProgress && onProgress(name, done, total));
+    // Kick off ALL downloads concurrently (was: fully sequential — fetch A,
+    // THEN fetch B, THEN fetch C... measured ~220s wall time for ~1.1GB vs
+    // ~130-165s when the 4 fetches overlap). Session creation (wasm compile,
+    // CPU-bound) still happens one at a time, in listed order, as soon as
+    // each file's bytes are in — the smaller files (encoder/embedding)
+    // typically land first and compile while the decoder keeps downloading.
+    const entries = Object.entries(urls);
+    const pending = new Map(entries.map(([name, url]) =>
+      [name, fetchFn(url, (done, total) =>
+        onProgress && onProgress(name, done, total))]));
+    for (const [name] of entries) {
+      const buf = await pending.get(name);
       this.sessions[name] = await this.ort.InferenceSession.create(buf, {
         executionProviders: this.eps || ["wasm"],
       });

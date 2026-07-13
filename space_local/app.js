@@ -27,12 +27,59 @@ function currentWindowS() {
 }
 let busy = false, aborted = false;
 let segs = [], rows = [], activeIdx = -1, hiddenSpk = new Set();
+let lastLinked = []; // segments finalized by prior windows in the current run
+
+// A new file/mic/example request starting WHILE a previous one is still
+// running (e.g. dropping a second file before the first finishes) used to be
+// silently ignored — `busy` was only ever set true deep inside transcribe(),
+// AFTER resetView() and an async audio-decode had already run, leaving a
+// real window where two requests could race. From the outside this looked
+// exactly like "I picked a new file but the transcript still shows the
+// previous clip": the previous run just kept streaming into a view the user
+// thought belonged to the new file. Fix: claim the lock SYNCHRONOUSLY,
+// before any await, at every entry point, and visibly disable the controls
+// that could start a second request while one is in flight.
+function acquireBusy() {
+  if (busy) return false;
+  busy = true;
+  setControlsEnabled(false);
+  return true;
+}
+function releaseBusy() {
+  busy = false;
+  setControlsEnabled(true);
+}
+function setControlsEnabled(enabled) {
+  $("file-in").disabled = !enabled;
+  drop.classList.toggle("disabled", !enabled);
+  document.querySelectorAll("[data-ex]").forEach((b) => { b.disabled = !enabled; });
+}
 let _s2tw = (t) => t;
 try {
   if (window.OpenCC) _s2tw = window.OpenCC.Converter({ from: "cn", to: "tw" });
 } catch (e) { console.warn("opencc unavailable", e); }
-// written-form post-processing: Traditional script (s2tw) then number ITN
+// written-form post-processing: Traditional script (s2tw) then number ITN.
 const s2tw = (t) => itn(_s2tw(t));
+
+// HTML-escaped display text, CACHED by source string: renderTranscript
+// re-runs on every decoded token, and without this cache it re-converts
+// (OpenCC + ITN + HTML-escape) EVERY prior segment's full text on EVERY
+// token — for a long meeting with many already-closed segments, that's
+// thousands of redundant conversions per window and is the main driver of
+// the UI becoming unresponsive on longer audio. Segment text is immutable
+// once a segment closes, so caching by the exact string is safe and bounded
+// by the number of distinct segments ever seen in the session. (The
+// in-progress "tail" text changes every token by definition, so it's
+// converted directly, uncached, below — it's a single string, not O(n).)
+const dispCache = new Map();
+function dispText(text) {
+  let v = dispCache.get(text);
+  if (v === undefined) {
+    v = s2tw(text).replace(/</g, "&lt;");
+    dispCache.set(text, v);
+  }
+  return v;
+}
 
 $("input-note").textContent =
   "CPU-only · runs in a background worker";
@@ -80,9 +127,11 @@ function primeDownloadBars(quality) {
   $("btn-load").disabled = true;
 }
 
+let loadKicked = false;
 $("btn-load").onclick = () => {
   const quality = "int8";
-  if (workerReady) return;
+  if (workerReady || loadKicked) return;
+  loadKicked = true;
   primeDownloadBars(quality);
   // a bare load: run with an empty tail so the worker just initializes
   getWorker().postMessage({ type: "run", wav: new Float32Array(16000).buffer,
@@ -133,7 +182,7 @@ function renderTranscript(tail = "") {
     `<div class="seg${s.speaker === "…" ? " live" : ""}" data-i="${i}">` +
     `<span class="ts">${fmt(s.start)}</span>` +
     `<span class="spk" style="color:${color[s.speaker]}">${s.speaker}</span>` +
-    `<span>${s2tw(s.text).replace(/</g, "&lt;")}</span></div>`).join("") +
+    `<span>${dispText(s.text)}</span></div>`).join("") +
     (tail ? `<div class="tail">${s2tw(tail).replace(/</g, "&lt;")}</div>` : "")) ||
     '<div class="placeholder">…</div>';
   rows = [...box.querySelectorAll(".seg")];
@@ -149,6 +198,36 @@ function renderTranscript(tail = "") {
   applyFilter();
   activeIdx = -1;
   if ($("autoscroll").checked) box.scrollTop = box.scrollHeight;
+}
+
+// The worker posts a "token" message on every single decoded token (needed
+// for the live streaming cursor). Two things scale with the total segment
+// count accumulated so far (across ALL prior windows, so this only gets
+// worse the longer the meeting runs) if done on every token: rebuilding the
+// merged segment array, and — far more expensive — the transcript DOM
+// render (OpenCC/ITN conversion + full innerHTML rebuild). On a long
+// meeting this was the main driver of the tab becoming unresponsive and
+// eventually crashing. Both are deferred into a single rAF callback, so
+// during a burst of tokens only the LATEST state is kept and the array
+// merge + DOM write happen at most once per animation frame instead of
+// once per token.
+let rafPending = false, rafProv = null, rafTail = "", rafOff = 0;
+function scheduleTranscriptRender(prov, tail, off) {
+  rafProv = prov; rafTail = tail; rafOff = off;
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    segs = [...lastLinked, ...rafProv.map((s) => ({
+      start: s.start + rafOff, end: s.end + rafOff, speaker: "…", text: s.text,
+    }))];
+    renderTranscript(rafTail);
+  });
+}
+function cancelScheduledRender() {
+  rafPending = false;
+  rafProv = null;
+  rafTail = "";
 }
 
 function applyFilter() {
@@ -198,6 +277,9 @@ function offerDownloads(finalSegs) {
 
 function resetView(placeholder) {
   segs = []; rows = []; hiddenSpk = new Set(); activeIdx = -1;
+  lastLinked = [];
+  cancelScheduledRender();
+  dispCache.clear();
   $("legend").innerHTML = "";
   $("stats").textContent = "";
   $("dl-srt").style.display = "none";
@@ -209,23 +291,27 @@ function resetView(placeholder) {
 /* ============================ examples ============================ */
 document.querySelectorAll("[data-ex]").forEach((btn) => {
   btn.onclick = async () => {
-    if (busy) return;
-    const stem = btn.dataset.ex;
-    resetView("載入範例…");
-    const data = await (await fetch(`${EXAMPLES}${stem}.json`)).json();
-    segs = data.segments.map((s) => ({ ...s }));
-    $("audio").src = `${EXAMPLES}${stem}.mp3`;
-    $("player-box").style.display = "";
-    renderLegend();
-    renderTranscript();
-    $("transcript").scrollTop = 0;
-    const dur = Math.max(...segs.map((s) => s.end));
-    const nSpk = new Set(segs.map((s) => s.speaker)).size;
-    $("status").textContent =
-      "真實會議 · 預先計算（本頁同一條 pipeline 產生）· 點任一句可跳播";
-    $("stats").textContent =
-      `${fmt(dur)} · ${segs.length} segments · ${nSpk} speakers`;
-    offerDownloads(segs);
+    if (!acquireBusy()) return;
+    try {
+      const stem = btn.dataset.ex;
+      resetView("載入範例…");
+      const data = await (await fetch(`${EXAMPLES}${stem}.json`)).json();
+      segs = data.segments.map((s) => ({ ...s }));
+      $("audio").src = `${EXAMPLES}${stem}.mp3`;
+      $("player-box").style.display = "";
+      renderLegend();
+      renderTranscript();
+      $("transcript").scrollTop = 0;
+      const dur = Math.max(...segs.map((s) => s.end));
+      const nSpk = new Set(segs.map((s) => s.speaker)).size;
+      $("status").textContent =
+        "真實會議 · 預先計算（本頁同一條 pipeline 產生）· 點任一句可跳播";
+      $("stats").textContent =
+        `${fmt(dur)} · ${segs.length} segments · ${nSpk} speakers`;
+      offerDownloads(segs);
+    } finally {
+      releaseBusy();
+    }
   };
 });
 
@@ -261,16 +347,21 @@ $("file-in").onchange = (e) => {
 };
 
 async function handleFile(f) {
-  if (busy) return;
+  if (!acquireBusy()) {
+    $("status").textContent =
+      "Still working on the previous audio — click ✕ Stop first, or wait for it to finish.";
+    return;
+  }
   resetView(`解析 ${f.name}…`);
   $("status").textContent = `Decoding ${f.name}…`;
   try {
     $("audio").src = URL.createObjectURL(f);
     $("player-box").style.display = "";
     const wav = await blobTo16k(f);
-    await transcribe(wav);
+    await transcribe(wav); // transcribe() owns the lock from here; releases it when done
   } catch (err) {
     $("status").textContent = "Could not decode this file: " + err.message;
+    releaseBusy();
   }
 }
 
@@ -278,7 +369,13 @@ let recorder = null, recChunks = [];
 $("btn-rec").onclick = async () => {
   const btn = $("btn-rec");
   if (recorder && recorder.state === "recording") { recorder.stop(); return; }
-  if (busy) return;
+  // Held for the whole record+transcribe lifecycle, same lock a file upload
+  // uses, so a file can't be dropped mid-recording (or vice versa).
+  if (!acquireBusy()) {
+    $("status").textContent =
+      "Still working on the previous audio — click ✕ Stop first, or wait for it to finish.";
+    return;
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recChunks = [];
@@ -288,11 +385,16 @@ $("btn-rec").onclick = async () => {
       stream.getTracks().forEach((t) => t.stop());
       btn.textContent = "● Record mic";
       btn.classList.remove("rec-on");
-      const blob = new Blob(recChunks);
-      $("audio").src = URL.createObjectURL(blob);
-      $("player-box").style.display = "";
-      resetView("處理錄音…");
-      transcribe(await blobTo16k(blob, MIC_MAX_S));
+      try {
+        const blob = new Blob(recChunks);
+        $("audio").src = URL.createObjectURL(blob);
+        $("player-box").style.display = "";
+        resetView("處理錄音…");
+        await transcribe(await blobTo16k(blob, MIC_MAX_S)); // owns the lock from here
+      } catch (err) {
+        $("status").textContent = "Could not process the recording: " + err.message;
+        releaseBusy();
+      }
     };
     recorder.start();
     btn.textContent = "■ Stop & transcribe";
@@ -302,6 +404,7 @@ $("btn-rec").onclick = async () => {
                MIC_MAX_S * 1000);
   } catch (e) {
     $("status").textContent = "Mic error: " + e.message;
+    releaseBusy();
   }
 };
 
@@ -348,15 +451,16 @@ function hbStop() {
 
 /* ============================ live transcription ============================ */
 async function transcribe(wav) {
-  if (busy) return;
-  busy = true;
+  // Caller (handleFile / mic recorder.onstop) already called acquireBusy()
+  // synchronously before doing any async work; this function owns releasing
+  // it via finish() below.
   aborted = false;
   $("btn-abort").style.display = "";
   const secs = wav.length / 16000;
   const WINDOW_S = currentWindowS();
   const nWin = Math.max(1, Math.ceil(secs / WINDOW_S));
   const t0 = Date.now();
-  let lastLinked = [];
+  lastLinked = [];
   hbStart();
   beat("loading model");
   const quality = "int8";
@@ -366,7 +470,7 @@ async function transcribe(wav) {
   $("bar").style.display = "";
 
   const finish = () => {
-    hbStop(); busy = false; onWorkerMsg = null;
+    hbStop(); releaseBusy(); onWorkerMsg = null;
     $("btn-abort").style.display = "none";
   };
 
@@ -383,14 +487,12 @@ async function transcribe(wav) {
         beat(`decoding · ${(m.n / m.dt).toFixed(1)} tok/s`);
         const off = m.wi * WINDOW_S;
         const { segs: prov, tail } = parseLenientWithTail(m.text);
-        segs = [...lastLinked, ...prov.map((s) => ({
-          start: s.start + off, end: s.end + off, speaker: "…", text: s.text,
-        }))];
-        renderTranscript(tail);
+        scheduleTranscriptRender(prov, tail, off);
         $("status").textContent = `Window ${m.wi + 1}/${m.nw} · ${(m.n / m.dt).toFixed(1)} tok/s`;
       } else if (m.type === "window") {
         beat(`window ${m.done}/${m.total} linked`);
         lastLinked = m.linked;
+        cancelScheduledRender();
         segs = m.linked;
         renderLegend(); renderTranscript();
         const el = (Date.now() - t0) / 1000;
@@ -401,6 +503,7 @@ async function transcribe(wav) {
           `${new Set(m.linked.map((s) => s.speaker)).size} speakers` +
           (m.done < m.total ? ` · ~${fmt(eta)} left` : "");
       } else if (m.type === "done") {
+        cancelScheduledRender();
         segs = m.segs;
         renderLegend(); renderTranscript();
         const el = (Date.now() - t0) / 1000;

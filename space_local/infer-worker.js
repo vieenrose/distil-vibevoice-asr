@@ -13,24 +13,71 @@ let pipe = null;
 
 const post = (type, payload) => self.postMessage({ type, ...payload });
 
+// HF's CDN sends these files with `Cache-Control: no-store`, so the browser's
+// normal HTTP cache can never keep them — every page load would otherwise
+// re-download the full ~1.1GB, every time. Cache them ourselves with the
+// Cache Storage API instead (available directly in a worker's global scope,
+// same-origin, no Service Worker involvement needed). Model URLs are
+// immutable per deployed filename, so a plain cache-first strategy is safe;
+// bump MODEL_CACHE's suffix if a future deploy ever reuses a filename for
+// different content.
+const MODEL_CACHE = "moss-model-cache-v1";
+
+// Stream into a SINGLE pre-sized buffer (Content-Length known ahead of time)
+// instead of collecting chunks in a JS array and copying once at the end —
+// the collect-then-copy pattern briefly doubles peak memory for large files
+// (encoder/decoder are 300-600MB each) at the exact moment 2-3 other model
+// files are also resident, which is the main contributor to slow, GC-heavy
+// downloads and to tipping the tab over its WASM memory ceiling on long runs.
 async function fetchProgress(url, onProgress) {
+  const cache = await caches.open(MODEL_CACHE);
+  const cached = await cache.match(url);
+  if (cached) {
+    const buf = await cached.arrayBuffer();
+    onProgress(buf.byteLength, buf.byteLength);
+    return buf;
+  }
+
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${url.split("/").pop()}: HTTP ${r.status}`);
   const total = +r.headers.get("Content-Length") || 0;
   const reader = r.body.getReader();
-  const chunks = [];
+  const buf = total ? new Uint8Array(total) : null;
+  const chunks = buf ? null : []; // fallback if server omits Content-Length
   let done = 0;
   for (;;) {
     const { value, done: end } = await reader.read();
     if (end) break;
-    chunks.push(value);
+    if (buf) buf.set(value, done);
+    else chunks.push(value);
     done += value.length;
-    onProgress(done, total);
+    onProgress(done, total || done);
   }
-  const buf = new Uint8Array(done);
-  let o = 0;
-  for (const c of chunks) { buf.set(c, o); o += c.length; }
-  return buf.buffer;
+  const out = buf || (() => {
+    const o = new Uint8Array(done);
+    let off = 0;
+    for (const c of chunks) { o.set(c, off); off += c.length; }
+    return o;
+  })();
+
+  // Cache a copy for next time. AWAITED (not fire-and-forget): for the two
+  // largest files (encoder/decoder, 300-600MB) an un-awaited write was
+  // measured to frequently lose the race against the page navigating away
+  // shortly after "ready" fires — a dedicated Worker is torn down the
+  // moment its page navigates/closes, which cuts off any still-pending
+  // write. Writing to Cache Storage is local disk I/O, much faster than the
+  // network fetch that just happened, so this costs little and makes
+  // "one-time download" an actual guarantee instead of a best effort.
+  try {
+    await cache.put(url, new Response(out, {
+      headers: {
+        "Content-Type": r.headers.get("Content-Type") || "application/octet-stream",
+        "Content-Length": String(out.byteLength),
+      },
+    }));
+  } catch { /* storage quota or similar — this file just re-downloads next time */ }
+
+  return out.buffer;
 }
 
 async function ensureModel(quality) {
@@ -54,6 +101,14 @@ async function ensureModel(quality) {
   const p = new MossPipeline(ort, cfg, melBin, vocab);
   // fp32 KV (onnxruntime-web lacks Float16Array support)
   p.eps = ["wasm"];
+  // Fetch all 4 weight files CONCURRENTLY (was: strictly sequential, which
+  // measured ~220s wall time — encoder 37s + embedding 6s + decoder 166s +
+  // ecapa ~15s, one after another — vs a theoretical ~130-165s if the
+  // fetches overlap and each streams close to its own measured rate).
+  // Session CREATION (the actual wasm compile/init, CPU-bound) still happens
+  // one at a time in a fixed order, right after each file's bytes land, so
+  // peak concurrent memory stays bounded to "all 4 downloads in flight" not
+  // "all 4 downloads + all 4 compiled sessions" at once.
   await p.load(models, fetchProgress,
     (name, done, total) => post("dl", { name, done, total }));
   pipe = p;
@@ -61,11 +116,23 @@ async function ensureModel(quality) {
 }
 
 let aborted = false;
+let running = false; // defense-in-depth: the main thread's acquireBusy()
+                      // lock should already prevent overlapping "run"
+                      // requests, but a second one landing here anyway
+                      // (e.g. a future code path that forgets the lock)
+                      // must be rejected outright rather than interleaved
+                      // with an in-flight transcribeMeeting() call, which
+                      // would jumble two audios' segments/messages together.
 
 self.onmessage = async (e) => {
   const msg = e.data;
   if (msg.type === "abort") { aborted = true; return; }
   if (msg.type === "run") {
+    if (running) {
+      post("error", { message: "a transcription is already running" });
+      return;
+    }
+    running = true;
     aborted = false;
     try {
       await ensureModel(msg.quality);
@@ -81,6 +148,8 @@ self.onmessage = async (e) => {
       post("done", { segs, aborted });
     } catch (err) {
       post("error", { message: err.message });
+    } finally {
+      running = false;
     }
   }
 };
