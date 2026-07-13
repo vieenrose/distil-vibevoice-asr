@@ -333,21 +333,90 @@ document.querySelectorAll("[data-ex]").forEach((btn) => {
 //     window straddling a chunk boundary matched a direct whole-file
 //     decode almost exactly — differences were within normal run-to-run
 //     ASR variation, not audible artifacts).
-// Any other container (m4a/ogg/webm/flac/...) falls back to the original
-// single-shot decode — those need real container parsing to chunk safely,
-// which this doesn't implement — guarded by a duration cap so an
-// extreme-length file fails with a clear message instead of silently
-// crashing the tab.
+// Any other container (m4a/ogg/webm/flac/...) is decoded in one shot by the
+// browser while it's short enough to stay under memory (mic recordings, clips
+// under GENERIC_DECODE_MAX_S), and for anything longer — or anything the
+// browser can't decode at all — we transcode it with a lazily-loaded, self-
+// hosted ffmpeg.wasm (see ffmpegTo16k) straight down to 16kHz mono, which is
+// memory-bounded regardless of length and handles essentially any format.
 const CHUNK_S = 20;              // seconds of source audio decoded per WAV chunk
 const MP3_CHUNK_BYTES = 2097152; // ~2 min @ 128kbps per MP3 chunk
-// Safety net for formats we can't chunk (m4a/ogg/webm/flac/...): a single
-// decodeAudioData() call needs roughly duration * sampleRate * channels * 4
-// bytes for the native buffer alone, and a 2h 44.1kHz stereo file (~2.5GB)
-// was confirmed to crash the tab outright. 40 min keeps worst-realistic-case
-// (48kHz stereo) well under ~1GB for that one buffer, leaving headroom for
-// everything else already resident (model weights, the resampled output,
-// the app itself) — a much smaller margin than this cap previously allowed.
+// Above this, a single browser decodeAudioData() call (which needs roughly
+// duration * sampleRate * channels * 4 bytes for the native-rate buffer
+// alone — a 2h 44.1kHz stereo file is ~2.5GB, confirmed to crash the tab)
+// is skipped in favour of the ffmpeg.wasm path. 40 min keeps the one-shot
+// decode's worst-realistic case (48kHz stereo) well under ~1GB.
 const GENERIC_DECODE_MAX_S = 40 * 60;
+
+// ffmpeg.wasm is self-hosted under ./ffmpeg/ (same origin) for two reasons:
+// its internal Web Worker can't be constructed from a cross-origin script
+// (browser security), and keeping it local preserves the demo's "nothing
+// leaves your machine" property — no third-party CDN hit at runtime. It's
+// ~32MB, imported and initialized ONLY on first actual use, so the common
+// WAV/MP3/mic paths never pay for it. One instance, reused across files.
+let ffmpegPromise = null;
+// Fetch a URL and hand back a same-origin blob: URL for its bytes. ffmpeg's
+// core .wasm (~32MB) is stored in the Space's Git LFS, which serves it as a
+// 302 redirect to a cross-origin CDN — and ffmpeg-core.js's own internal
+// fetch of that URL fails under this page's cross-origin isolation (the
+// redirected CDN response isn't COEP-embeddable). Fetching it ourselves
+// (our fetch follows the redirect exactly like the model weights do) and
+// passing ffmpeg a blob: URL sidesteps the redirect and the COEP check
+// entirely. This is the same reason the upstream examples use toBlobURL().
+async function toBlobURL(url, mimeType) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url.split("/").pop()}: HTTP ${r.status}`);
+  return URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: mimeType }));
+}
+function getFFmpeg() {
+  if (ffmpegPromise) return ffmpegPromise;
+  ffmpegPromise = (async () => {
+    const { FFmpeg } = await import("./ffmpeg/index.js");
+    const ff = new FFmpeg();
+    const base = new URL("./ffmpeg/", location.href).href;
+    await ff.load({
+      coreURL: await toBlobURL(base + "core/ffmpeg-core.js", "text/javascript"),
+      wasmURL: await toBlobURL(base + "core/ffmpeg-core.wasm", "application/wasm"),
+    });
+    return ff;
+  })().catch((e) => { ffmpegPromise = null; throw e; }); // let a failed load be retried
+  return ffmpegPromise;
+}
+
+// Transcode any blob to a 16kHz-mono Float32Array via ffmpeg.wasm. Converts
+// straight to raw f32le PCM in a single pass (no intermediate WAV container,
+// no browser decodeAudioData, no full-rate buffer), so peak memory scales
+// with the 16kHz output (~230MB/hour) rather than the native-rate decode
+// that crashes the tab. Validated: an ffmpeg-converted M4A transcribed
+// byte-identically to the same audio decoded from the original WAV.
+async function ffmpegTo16k(blob, onStatus) {
+  let ff;
+  try {
+    onStatus && onStatus("Loading audio converter (~32 MB, one-time)…");
+    ff = await getFFmpeg();
+  } catch (e) {
+    throw new Error("Couldn't load the audio converter: " + e.message);
+  }
+  const onProg = ({ progress }) => onStatus &&
+    onStatus(`Converting audio… ${Math.min(100, Math.round((progress || 0) * 100))}%`);
+  ff.on("progress", onProg);
+  try {
+    await ff.writeFile("in", new Uint8Array(await blob.arrayBuffer()));
+    // -vn drops any cover-art/video stream so we never try to decode it
+    const code = await ff.exec(["-i", "in", "-vn", "-ar", "16000", "-ac", "1", "-f", "f32le", "out.raw"]);
+    if (code !== 0) throw new Error("ffmpeg exited with code " + code);
+    const data = await ff.readFile("out.raw"); // Uint8Array of f32 little-endian bytes
+    // copy into a fresh, 4-byte-aligned buffer before viewing as Float32
+    const aligned = data.slice().buffer;
+    return new Float32Array(aligned);
+  } catch (e) {
+    throw new Error("Audio conversion failed: " + e.message);
+  } finally {
+    ff.off("progress", onProg);
+    ff.deleteFile("in").catch(() => {});
+    ff.deleteFile("out.raw").catch(() => {});
+  }
+}
 
 function probeDuration(blob) {
   return new Promise((resolve, reject) => {
@@ -461,7 +530,7 @@ async function decodeMp3Chunked(file, totalS) {
     Promise.resolve(file.slice(i * MP3_CHUNK_BYTES, Math.min((i + 1) * MP3_CHUNK_BYTES, file.size))));
 }
 
-async function blobTo16k(blob, maxS = 0) {
+async function blobTo16k(blob, maxS = 0, onStatus = null) {
   const durationS = await probeDuration(blob).catch(() => 0);
   const isMp3 = /mpeg|mp3/i.test(blob.type) || /\.mp3$/i.test(blob.name || "");
   const wavHeader = !isMp3 ? await parseWavHeader(blob).catch(() => null) : null;
@@ -470,22 +539,22 @@ async function blobTo16k(blob, maxS = 0) {
   try {
     if (wavHeader) wav = await decodeWavChunked(blob, wavHeader);
     else if (isMp3 && durationS > 0) wav = await decodeMp3Chunked(blob, durationS);
-  } catch { /* fall through to the generic single-shot path below */ }
+  } catch { /* fall through to the generic path below */ }
 
-  if (!wav) {
-    if (durationS > GENERIC_DECODE_MAX_S) {
-      throw new Error(
-        `This file is ${(durationS / 3600).toFixed(1)}h long in a format this app can only load ` +
-        `all at once (${blob.type || "unknown type"}), and a file this long could crash the ` +
-        `browser tab. WAV and MP3 don't have this limit — convert it first, e.g.: ` +
-        `ffmpeg -i input.m4a -c:a pcm_s16le output.wav`);
-    }
-    const arr = await blob.arrayBuffer();
-    const ac = new AudioContext();
-    const decoded = await ac.decodeAudioData(arr);
-    ac.close();
-    wav = await resampleTo16kMono(decoded);
+  // Other formats: browser one-shot decode while short enough to stay under
+  // memory; otherwise (too long, OR the browser can't decode it at all) hand
+  // off to ffmpeg.wasm, which is memory-bounded and format-agnostic.
+  if (!wav && durationS <= GENERIC_DECODE_MAX_S) {
+    try {
+      const arr = await blob.arrayBuffer();
+      const ac = new AudioContext();
+      const decoded = await ac.decodeAudioData(arr);
+      ac.close();
+      wav = await resampleTo16kMono(decoded);
+    } catch { /* undecodable by the browser — ffmpeg fallback below */ }
   }
+  if (!wav) wav = await ffmpegTo16k(blob, onStatus);
+
   return maxS > 0 ? wav.subarray(0, Math.min(wav.length, Math.ceil(maxS * 16000))) : wav;
 }
 
@@ -516,7 +585,7 @@ async function handleFile(f) {
   try {
     $("audio").src = URL.createObjectURL(f);
     $("player-box").style.display = "";
-    const wav = await blobTo16k(f);
+    const wav = await blobTo16k(f, 0, (msg) => { $("status").textContent = msg; });
     await transcribe(wav); // transcribe() owns the lock from here; releases it when done
   } catch (err) {
     $("status").textContent = "Could not decode this file: " + err.message;

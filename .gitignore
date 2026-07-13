@@ -55,3 +55,7 @@ vendor/
 space/examples/*.mp3
 space_static/examples/*.mp3
 space_local/models/*.onnx
+# Vendored ffmpeg.wasm core build artifacts (~32MB); re-fetch via
+# space_local/ffmpeg/core/fetch-core.sh. The small ESM wrapper files
+# (space_local/ffmpeg/*.js) ARE committed.
+space_local/ffmpeg/core/ffmpeg-core.*
