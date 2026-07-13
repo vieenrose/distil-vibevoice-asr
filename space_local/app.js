@@ -316,18 +316,169 @@ document.querySelectorAll("[data-ex]").forEach((btn) => {
 });
 
 /* ============================ audio input ============================ */
-async function blobTo16k(blob, maxS = 0) {
-  const arr = await blob.arrayBuffer();
-  const ac = new AudioContext();
-  const decoded = await ac.decodeAudioData(arr);
-  ac.close();
-  const secs = maxS > 0 ? Math.min(decoded.duration, maxS) : decoded.duration;
-  const oac = new OfflineAudioContext(1, Math.ceil(secs * 16000), 16000);
+// A single decodeAudioData() call on the WHOLE file materializes the full
+// audio at its native sample rate/channel count before we ever get to
+// touch it — for a real 2h 44.1kHz stereo recording that's ~2.5GB, and was
+// confirmed (via testing) to crash the tab outright, before transcription
+// even starts. WAV and MP3 — by far the most common recording formats —
+// can both be decoded in bounded-size pieces instead, keeping peak memory
+// roughly constant regardless of file length:
+//   - WAV: PCM data is trivially sliceable at any frame boundary. Each
+//     slice is wrapped in a synthesized minimal WAV header (reusing the
+//     browser's own decodeAudioData for the bit-depth/float conversion
+//     instead of hand-rolling it) and decoded independently.
+//   - MP3: frames are self-syncing, so decodeAudioData tolerates arbitrary
+//     byte-range slices even when they don't start on a frame boundary
+//     (verified against a real 11-minute meeting recording: transcribing a
+//     window straddling a chunk boundary matched a direct whole-file
+//     decode almost exactly — differences were within normal run-to-run
+//     ASR variation, not audible artifacts).
+// Any other container (m4a/ogg/webm/flac/...) falls back to the original
+// single-shot decode — those need real container parsing to chunk safely,
+// which this doesn't implement — guarded by a duration cap so an
+// extreme-length file fails with a clear message instead of silently
+// crashing the tab.
+const CHUNK_S = 20;              // seconds of source audio decoded per WAV chunk
+const MP3_CHUNK_BYTES = 2097152; // ~2 min @ 128kbps per MP3 chunk
+const GENERIC_DECODE_MAX_S = 3 * 3600; // safety net for formats we can't chunk
+
+function probeDuration(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const el = new Audio();
+    el.preload = "metadata";
+    el.src = url;
+    el.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(el.duration); };
+    el.onerror = () => { URL.revokeObjectURL(url); reject(new Error("could not read audio metadata")); };
+  });
+}
+
+async function resampleTo16kMono(decoded) {
+  const oac = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * 16000)), 16000);
   const src = oac.createBufferSource();
   src.buffer = decoded;
   src.connect(oac.destination);
   src.start();
   return (await oac.startRendering()).getChannelData(0);
+}
+
+// Decodes `chunkCount` pieces (via getChunkBlob) and concatenates them into
+// one 16kHz-mono buffer, pre-sized from `estimatedTotalS` with slack and a
+// grow-on-overflow fallback — estimated duration (e.g. from a VBR MP3's
+// container metadata) is usually exact but isn't guaranteed to be, and
+// silently truncating audio if it undershoots would be a real data-loss bug.
+async function decodeChunked(estimatedTotalS, chunkCount, getChunkBlob) {
+  let out = new Float32Array(Math.ceil(estimatedTotalS * 16000) + 16000);
+  const ac = new AudioContext();
+  let pos = 0;
+  for (let i = 0; i < chunkCount; i++) {
+    const decoded = await ac.decodeAudioData(await (await getChunkBlob(i)).arrayBuffer());
+    const resampled = await resampleTo16kMono(decoded);
+    if (pos + resampled.length > out.length) {
+      const grown = new Float32Array(Math.max(out.length * 2, pos + resampled.length));
+      grown.set(out.subarray(0, pos));
+      out = grown;
+    }
+    out.set(resampled, pos);
+    pos += resampled.length;
+  }
+  ac.close();
+  return pos < out.length ? out.subarray(0, pos) : out;
+}
+
+// audioFormat: 1 = PCM int, 3 = IEEE float. WAVE_FORMAT_EXTENSIBLE (0xFFFE)
+// needs its sub-format GUID parsed to know which — not handled here, falls
+// back to the generic path instead of risking a mis-decoded chunk.
+async function parseWavHeader(file) {
+  const head = new DataView(await file.slice(0, 65536).arrayBuffer());
+  if (head.byteLength < 44 || head.getUint32(0, false) !== 0x52494646 ||
+      head.getUint32(8, false) !== 0x57415645) return null;
+  let off = 12, fmt = null, dataOff = -1, dataLen = 0;
+  while (off + 8 <= head.byteLength) {
+    const id = String.fromCharCode(
+      head.getUint8(off), head.getUint8(off + 1), head.getUint8(off + 2), head.getUint8(off + 3));
+    const len = head.getUint32(off + 4, true);
+    if (id === "fmt ") {
+      const audioFormat = head.getUint16(off + 8, true);
+      if (audioFormat !== 1 && audioFormat !== 3) return null;
+      fmt = {
+        audioFormat,
+        channels: head.getUint16(off + 10, true),
+        sampleRate: head.getUint32(off + 12, true),
+        bitsPerSample: head.getUint16(off + 22, true),
+      };
+    } else if (id === "data") {
+      dataOff = off + 8;
+      const remaining = file.size - dataOff;
+      dataLen = (len > 0 && len <= remaining) ? len : remaining; // some writers leave a placeholder size
+      break;
+    }
+    off += 8 + len + (len % 2);
+  }
+  if (!fmt || dataOff < 0 || dataLen <= 0) return null;
+  return { ...fmt, dataOff, dataLen };
+}
+
+function wavHeaderBytes({ audioFormat, channels, sampleRate, bitsPerSample }, dataLen) {
+  const buf = new ArrayBuffer(44);
+  const v = new DataView(buf);
+  const blockAlign = channels * (bitsPerSample / 8);
+  v.setUint32(0, 0x52494646, false); v.setUint32(4, 36 + dataLen, true);
+  v.setUint32(8, 0x57415645, false); v.setUint32(12, 0x666d7420, false);
+  v.setUint32(16, 16, true); v.setUint16(20, audioFormat, true); v.setUint16(22, channels, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * blockAlign, true);
+  v.setUint16(32, blockAlign, true); v.setUint16(34, bitsPerSample, true);
+  v.setUint32(36, 0x64617461, false); v.setUint32(40, dataLen, true);
+  return new Uint8Array(buf);
+}
+
+async function decodeWavChunked(file, header) {
+  const bytesPerFrame = header.channels * (header.bitsPerSample / 8);
+  const totalFrames = Math.floor(header.dataLen / bytesPerFrame);
+  const totalS = totalFrames / header.sampleRate;
+  const framesPerChunk = Math.max(1, Math.floor(CHUNK_S * header.sampleRate));
+  const chunkCount = Math.ceil(totalFrames / framesPerChunk);
+  return decodeChunked(totalS, chunkCount, async (i) => {
+    const frame0 = i * framesPerChunk;
+    const nFrames = Math.min(framesPerChunk, totalFrames - frame0);
+    const byteStart = header.dataOff + frame0 * bytesPerFrame;
+    const byteLen = nFrames * bytesPerFrame;
+    const pcm = await file.slice(byteStart, byteStart + byteLen).arrayBuffer();
+    return new Blob([wavHeaderBytes(header, byteLen), pcm], { type: "audio/wav" });
+  });
+}
+
+async function decodeMp3Chunked(file, totalS) {
+  const chunkCount = Math.ceil(file.size / MP3_CHUNK_BYTES);
+  return decodeChunked(totalS, chunkCount, (i) =>
+    Promise.resolve(file.slice(i * MP3_CHUNK_BYTES, Math.min((i + 1) * MP3_CHUNK_BYTES, file.size))));
+}
+
+async function blobTo16k(blob, maxS = 0) {
+  const durationS = await probeDuration(blob).catch(() => 0);
+  const isMp3 = /mpeg|mp3/i.test(blob.type) || /\.mp3$/i.test(blob.name || "");
+  const wavHeader = !isMp3 ? await parseWavHeader(blob).catch(() => null) : null;
+
+  let wav;
+  try {
+    if (wavHeader) wav = await decodeWavChunked(blob, wavHeader);
+    else if (isMp3 && durationS > 0) wav = await decodeMp3Chunked(blob, durationS);
+  } catch { /* fall through to the generic single-shot path below */ }
+
+  if (!wav) {
+    if (durationS > GENERIC_DECODE_MAX_S) {
+      throw new Error(
+        `This file is ${(durationS / 3600).toFixed(1)}h long in a format this app can't load in ` +
+        `pieces (${blob.type || "unknown type"}) — very long files like this can crash the browser ` +
+        `tab. Please convert it to WAV or MP3, or split it into shorter parts.`);
+    }
+    const arr = await blob.arrayBuffer();
+    const ac = new AudioContext();
+    const decoded = await ac.decodeAudioData(arr);
+    ac.close();
+    wav = await resampleTo16kMono(decoded);
+  }
+  return maxS > 0 ? wav.subarray(0, Math.min(wav.length, Math.ceil(maxS * 16000))) : wav;
 }
 
 const drop = $("drop");
