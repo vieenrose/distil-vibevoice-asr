@@ -325,6 +325,18 @@ def main() -> int:
             proc.save_pretrained(ck)
             print(f"  ckpt -> {ck}", flush=True)
 
+    if args.fake_quant:
+        # Unwrap QATLinear -> its underlying nn.Linear before saving, so params
+        # keep their standard names (q_proj.weight, not q_proj.lin.weight).
+        # Without this, save_pretrained stores the wrapper names and a plain
+        # AutoModel load finds NOTHING -> random weights -> garbage output. The
+        # saved weights are the full-precision latents trained to be q4-robust;
+        # the ONNX q4 export applies the real rounding. (Mirrors scripts/49.)
+        for _, module in list(model.named_modules()):
+            for cn, child in list(module.named_children()):
+                if child.__class__.__name__ == "QATLinear":
+                    setattr(module, cn, child.lin)
+
     outdir = ROOT / args.out
     model.save_pretrained(outdir)
     proc.save_pretrained(outdir)
