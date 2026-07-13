@@ -289,27 +289,29 @@ function resetView(placeholder) {
 }
 
 /* ============================ examples ============================ */
+// Examples run LIVE (transcribed in-browser by the currently-deployed model),
+// NOT precomputed — so what you see always reflects the live model, never a
+// stale stored transcript. Clicking one fetches the example audio and runs it
+// through the exact same pipeline as a dropped file.
 document.querySelectorAll("[data-ex]").forEach((btn) => {
   btn.onclick = async () => {
-    if (!acquireBusy()) return;
-    try {
-      const stem = btn.dataset.ex;
-      resetView("載入範例…");
-      const data = await (await fetch(`${EXAMPLES}${stem}.json`)).json();
-      segs = data.segments.map((s) => ({ ...s }));
-      $("audio").src = `${EXAMPLES}${stem}.mp3`;
-      $("player-box").style.display = "";
-      renderLegend();
-      renderTranscript();
-      $("transcript").scrollTop = 0;
-      const dur = Math.max(...segs.map((s) => s.end));
-      const nSpk = new Set(segs.map((s) => s.speaker)).size;
+    if (!acquireBusy()) {
       $("status").textContent =
-        "真實會議 · 預先計算（本頁同一條 pipeline 產生）· 點任一句可跳播";
-      $("stats").textContent =
-        `${fmt(dur)} · ${segs.length} segments · ${nSpk} speakers`;
-      offerDownloads(segs);
-    } finally {
+        "Still working on the previous audio — click ✕ Stop first, or wait for it to finish.";
+      return;
+    }
+    const stem = btn.dataset.ex;
+    resetView(`載入範例 ${stem}…`);
+    try {
+      const url = `${EXAMPLES}${stem}.mp3`;
+      $("audio").src = url;
+      $("player-box").style.display = "";
+      const blob = await (await fetch(url)).blob();
+      const file = new File([blob], `${stem}.mp3`, { type: blob.type || "audio/mpeg" });
+      const wav = await blobTo16k(file, 0, (msg) => { $("status").textContent = msg; });
+      await transcribe(wav); // owns the lock from here; releases it when done
+    } catch (err) {
+      $("status").textContent = "無法載入範例：" + err.message;
       releaseBusy();
     }
   };
