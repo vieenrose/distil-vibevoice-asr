@@ -97,10 +97,17 @@ async function ensureModel(quality) {
   ort.env.wasm.proxy = false;  // we ARE the worker
   // int8 decoder only (highest accuracy; the q4 variant saved ~19% download
   // for a real accuracy hit, not worth it — diarization/accuracy first).
+  // v5 (diarization-fixed) decoder is q4, NOT int8: naive int8 quantization
+  // (per-tensor) rounds away the KL-restored voice->speaker discrimination and
+  // collapses diarization back to 1 speaker, whereas q4 MatMulNBits (block-32,
+  // per-block scales) preserves it — measured 3 speakers vs int8's 1 on the
+  // 5-min held-out meeting. q4 also outputs Simplified more often, but the s2tw
+  // post-process already fixes that; net win: the diarization fix survives to
+  // the browser AND the decoder is smaller (374MB q4 vs 598MB int8).
   const models = {
     encoder: WEIGHTS + "encoder.int8.onnx",
     embedding: WEIGHTS + "embedding.int8.onnx",
-    decoder: WEIGHTS + "decoder.int8.onnx",
+    decoder: WEIGHTS + "decoder.q4.onnx",
     ecapa: WEIGHTS + "ecapa.onnx",
   };
   const [cfg, melBin, vocab] = await Promise.all([

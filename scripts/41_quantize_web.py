@@ -47,8 +47,13 @@ def main() -> int:
     if not (out / "encoder.int8.onnx").exists():
         enc_fp32 = tmp / "encoder.fp32.onnx"
         consolidate(src / "encoder.onnx", enc_fp32)
+        # MatMul-only: quantizing Conv produces ConvInteger, which onnxruntime
+        # CPU/web has no kernel for -> "Could not find an implementation for
+        # ConvInteger" at session-create in the browser. The Whisper encoder's
+        # convs stay fp32; only its MatMuls are int8'd (still ~300MB, web-safe).
         quantize_dynamic(str(enc_fp32), str(out / "encoder.int8.onnx"),
-                         weight_type=QuantType.QInt8)
+                         weight_type=QuantType.QInt8,
+                         op_types_to_quantize=["MatMul"])
     print(f"encoder.int8.onnx: {(out/'encoder.int8.onnx').stat().st_size/1e6:.0f} MB")
 
     if not (out / "embedding.int8.onnx").exists():
