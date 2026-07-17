@@ -44,22 +44,29 @@ export class MossPipeline {
   }
 
   async load(urls, fetchFn, onProgress) {
-    // Kick off ALL downloads concurrently (was: fully sequential — fetch A,
-    // THEN fetch B, THEN fetch C... measured ~220s wall time for ~1.1GB vs
-    // ~130-165s when the 4 fetches overlap). Session creation (wasm compile,
-    // CPU-bound) still happens one at a time, in listed order, as soon as
-    // each file's bytes are in — the smaller files (encoder/embedding)
-    // typically land first and compile while the decoder keeps downloading.
-    const entries = Object.entries(urls);
-    const pending = new Map(entries.map(([name, url]) =>
-      [name, fetchFn(url, (done, total) =>
-        onProgress && onProgress(name, done, total))]));
-    for (const [name] of entries) {
-      const buf = await pending.get(name);
+    // Kick off ALL downloads AND their session creation independently per
+    // model (was: downloads concurrent, but session creation done in a
+    // strict for-await loop in listed order — encoder, THEN embedding, THEN
+    // decoder, THEN ecapa). That serialization meant the decoder (374 MB,
+    // the most expensive wasm compile of the four — int4 MatMulNBits has a
+    // heavier dequant kernel than the others' plain int8) had to wait behind
+    // TWO other compiles even if its own bytes had already arrived, and each
+    // compile's CPU-bound stretch starves the event loop that the other
+    // fetches' stream readers need to keep pulling bytes — measured historic
+    // breakdown: encoder 37s + embedding 6s + decoder 166s + ecapa ~15s,
+    // wildly disproportionate to relative file size (374 MB decoder vs
+    // 329 MB encoder). Now each model races independently: whichever
+    // download lands first starts compiling first, with a yield right
+    // before each compile so any other download's pending stream reads get
+    // a chance to run first instead of being queued behind a fixed order.
+    await Promise.all(Object.entries(urls).map(async ([name, url]) => {
+      const buf = await fetchFn(url, (done, total) =>
+        onProgress && onProgress(name, done, total));
+      await yieldToLoop();
       this.sessions[name] = await this.ort.InferenceSession.create(buf, {
         executionProviders: this.eps || ["wasm"],
       });
-    }
+    }));
   }
 
   /* ---- mel: matches WhisperFeatureExtractor (center-pad reflect) -------- */

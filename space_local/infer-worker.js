@@ -93,8 +93,22 @@ async function fetchProgress(url, onProgress) {
   return out.buffer;
 }
 
+let modelLoading = null;   // shared promise while the model is downloading, so
+                           // concurrent ensureModel() callers (a "load" click +
+                           // a "run" from a file dropped mid-download) share the
+                           // SAME download instead of racing or being rejected.
 async function ensureModel(quality) {
   if (pipe) return;
+  if (!modelLoading) modelLoading = loadModel(quality);
+  try {
+    await modelLoading;           // success: `pipe` is set, future calls no-op
+  } catch (err) {
+    modelLoading = null;          // failure: clear so a later run can retry
+    throw err;
+  }
+}
+
+async function loadModel(quality) {
   ort.env.wasm.numThreads = self.crossOriginIsolated
     ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
   ort.env.wasm.proxy = false;  // we ARE the worker
@@ -147,6 +161,13 @@ let running = false; // defense-in-depth: the main thread's acquireBusy()
 self.onmessage = async (e) => {
   const msg = e.data;
   if (msg.type === "abort") { aborted = true; return; }
+  if (msg.type === "load") {
+    // Preload the model WITHOUT holding the run lock, so a file dropped during
+    // the download isn't rejected — its "run" shares this same download.
+    try { await ensureModel(msg.quality); }
+    catch (err) { post("error", { message: err.message }); }
+    return;
+  }
   if (msg.type === "run") {
     if (running) {
       post("error", { message: "a transcription is already running" });

@@ -26,9 +26,12 @@ transcription with **speaker diarization + timestamps**.
 
 | What | Where |
 |---|---|
-| Fine-tuned model (v4, default) | [`Luigi/moss-transcribe-diarize-zhtw`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw) |
+| Fine-tuned model (v6-stream, deployed) | [`Luigi/moss-transcribe-diarize-zhtw`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw) |
+| **GGUF quantized models** (q4_K_M, v5 + v6-stream) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
+| **WASM browser demo** (ggml C++ engine, live) | [`Luigi/moss-transcribe-diarize-wasm`](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-wasm) (HF Space) |
+| **RapidSpeech.cpp engine** (WASM CPU/WebGPU + Jetson Nano CUDA ports) | [`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp) (`main` = WASM/CPU, `jetson-nano-gen1` = CUDA 10.2/sm_53) |
 | Quantized ONNX graphs (web / mobile / sherpa) | [`Luigi/moss-transcribe-diarize-zhtw-onnx`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-onnx) |
-| Fully-local browser demo | [`Luigi/zh-tw-transcriber-local`](https://huggingface.co/spaces/Luigi/zh-tw-transcriber-local) (HF Space) |
+| ONNX browser demo | [`Luigi/zh-tw-transcriber-local`](https://huggingface.co/spaces/Luigi/zh-tw-transcriber-local) (HF Space) |
 | Precomputed long-meeting viewer | [`Luigi/zh-tw-meeting-transcriber`](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber) |
 | sherpa-onnx C++ runtime port | [`vieenrose/sherpa-onnx@feature/moss-transcribe-diarize`](https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize) |
 
@@ -61,6 +64,9 @@ steps below). Held-out eval meetings `15361/15362/15857` are **never** trained o
 | **On-device** ONNX export | `30_export_moss_onnx.py` (`--last-logits`, `--fp16-kv`), `31_export_moss_qwen3style.py` | web / sherpa decoder graphs (parity-checked) |
 | Web quantization | `41_quantize_web.py`, `44_export_ecapa_onnx.py` | int8 / q4 graphs, ECAPA ONNX (conv-DFT STFT, cosine 1.0000) |
 | QAT + mixed-precision | `48_q4_sensitivity.py` (NAS) → `49_qat_q4.py` → `50_export_q4_mixed.py` | quantization-robust q4 |
+| Fine-tune **v5** (diarization defense) | `40_ft_moss_v5.py` | `models/moss_ft_zhtw_v5*` — 8× speaker-tag CE + KL-anchor to base ([Sxx] distribution), optional diarization-defended QAT |
+| **Quant ladder** q4→q3→ternary | `52_qat_ladder.py` | k-bit STE QAT (`--bits 4/3/2`, `--freeze-rest`, anneal, self-KL) — negative result, see below |
+| Fine-tune **v6-stream** (streaming) | `53_streaming_ft.py` | `models/moss_ft_zhtw_v6_stream3` — bounded 45 s audio-KV window (4D eviction mask + frozen full-attention teacher KL + silence-tail aug) |
 | **Demo build** | `37_build_space_example.py`, `43_dump_web_assets.py` | precomputed examples + browser assets |
 
 ## Fine-tuning recipe (v1 → v4)
@@ -75,8 +81,53 @@ cosine LR, single GPU. Target format `[start][Sxx]text[end]`, Traditional text.
 | **v2** | +2000 steps @ 5e-6 | **0.183** | 0.180 / — |
 | v3 | 300 s windows + real IVOD (30 %), 3000 steps | 0.18 | 0.244 / 0.814 *(diarization regressed)* |
 | **v4** | v3 data with **speaker-coverage purity filter** (`38`), 2000 steps | ~0.18 | **0.195 / 0.905** *(recovered)* |
+| **v5** | 8× speaker-tag CE + **KL-anchor to base at [Sxx] positions** (`40`) | ~0.18 | speaker count restored to base (3/3 on held-out 5-min) |
+| **v6-stream** | streaming FT: bounded 45 s audio-KV window (`53`), silence-tail aug, speaker-position KL | ASCEND all buckets **better than v5** (0.285 vs 0.417 all) | linked DER 0.132 ≈ v5's 0.128 |
 
 \* base-model gap is largely the Simplified↔Traditional script mismatch.
+
+**Key v4→v5 fix**: transcription-focused FT rounds progressively *forgot* the
+base model's speaker separation (base 3 → v4 1 speakers on a held-out 5-min
+meeting) — [Sxx] tags are a tiny token fraction, so uniform CE happily trades
+them away. Weighted CE alone couldn't restore voice discrimination (the model
+games CE via turn-taking cues); the fix is KL-anchoring the *speaker-tag
+distribution* to a frozen base teacher. The same defense is kept through QAT
+("diarization-defended QAT") and the v6 streaming FT.
+
+**v6-stream (deployed)**: fine-tuned so decode works with a **bounded 45 s
+audio-KV window** (monotonic eviction in the engine): audio KV memory is O(45 s)
+instead of O(meeting), per-token attention cost is constant, decode ~20 %
+faster, sub-second timestamps preserved. Under the bounded window the model
+cannot re-identify voices older than 45 s and correctly assigns fresh local
+[Sxx] ids — global identity is restored by the ECAPA/CAM++ linking stage, so
+streaming diarization is gated on **linked** DER (0.132 vs full-attention v5's
+0.128 = parity). Recipe essentials (all needed): 4D eviction attention mask
+built via `offset_mapping` (per-segment tokenizations do *not* concatenate —
+BPE merges across `[end][start]`); window curriculum 120→75→45 s; frozen
+full-attention teacher KL (all positions + extra weight on speaker positions);
+**silence-tail augmentation** (without it the FT hallucinates speech after the
+meeting ends — the base model didn't).
+
+## Quantization ladder: q4 wins, q3 and ternary are dead ends (measured)
+
+`52_qat_ladder.py` generalizes the q4 QAT to k-bit (bits=2 → block-scaled
+ternary, BitNet b1.58 format). Findings on the 0.6B decoder (native CPU, 8T):
+
+| rung | decode | CER / DER | verdict |
+|---|---|---|---|
+| q4_K_M (QAT) | 7.8 tok/s | 11.0 % / 0.12 | **shipped** |
+| q3_K FFN | 7.0 tok/s | ~11 % / 0.076 | dead: file *bigger* than q4 (k-quant bumps) + slower kernel |
+| ternary FFN (TQ2_0) | ~2.1× q4 (kernel bench) | ~21 % / 0.18+ | dead: capacity wall |
+
+Three independent ternary recipes (freeze-rest; co-train + self-KL + 4→3→2
+anneal + sensitivity-spared layers; CE-only + anneal) all converge to ~21 CER =
+**the 0.6B decoder cannot absorb ternary-FFN damage at fine-tuning scale** —
+a capacity wall, not a training bug. Two transferable QAT lessons:
+(1) fake-quantizing a *subset* of layers while training *all* params lets the
+unquantized params absorb the error — loss looks great, the deployed subset is
+PTQ-garbage; freeze everything but the quantized latents (`--freeze-rest`),
+which needs ~10× the LR. (2) self-distill KL against your *own* unquantized
+weights diverges (moving target); use CE or a frozen teacher.
 
 **Key v3→v4 fix**: v3's fused IVOD labels allowed segments spanning speaker
 turns, teaching merged-turn output (consistency 0.912→0.814). A 15 s length cap
@@ -166,8 +217,36 @@ The native runtime lives in the fork branch above: MOSS-SATS offline recognizer
 (adapted from the qwen3-asr impl), a character-state-machine SATS parser
 (differential-tested byte-exact vs the Python reference), windowed decoding
 (`--moss-sats-window-seconds`, default 300 — single-pass degenerates beyond
-~4–5 min), int8 graphs. A native phone app / WASM demo is a **separate future
-project**.
+~4–5 min), int8 graphs.
+
+## RapidSpeech.cpp port (ggml C++): WASM demo + Jetson Nano
+
+The maintained native runtime is the
+[`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp)
+fork — full MOSS-TD architecture (Whisper-medium encoder + Qwen3 decoder +
+`[start][Sxx]text[end]` parsing) on ggml, from one q4_K_M GGUF.
+
+- **WASM browser demo** (`main` branch, live Space above): multithreaded
+  wasm + relaxed-SIMD variant, WebGPU option, iOS build (1.5 GB heap cap,
+  iterative graph build for JSC's shallow worker stacks), CAM++ speaker
+  linking, hotwords, thread auto-calibration (hybrid P/E-core laptops:
+  `hardwareConcurrency` is misleading — a ~1.5 s microbenchmark picks the
+  real optimum, cached per device), pause-snapped windows, silence gate,
+  stall watchdog (a stalled window auto-recovers: worker killed, engine
+  reloaded from cache, window skipped — one bad window no longer kills a
+  2 h run).
+- **KV policy**: engine default f16 KV (half the memory of f32, sub-second
+  timestamps preserved; q8 KV snaps timestamps to whole seconds). Long
+  browser windows use **45 s audio-KV eviction** (v6-stream model) instead of
+  q8: flat heap at full f16 precision.
+- **Jetson Nano gen1** (`jetson-nano-gen1` branch): CUDA 10.2 / sm_53 /
+  C++14 / old-ggml adaptation; measured-best split is GPU encode + GPU
+  prefill + CPU decode (GPU decode is host-KV-staging bound). Eviction
+  ported for bounded-memory decode.
+- **Speed levers measured**: CPU pinning (`taskset` P-cores) alone 5.1→7.8
+  tok/s; eviction +20 %; next big lever is in-graph persistent KV +
+  flash-decode (llama.cpp decodes the same arch ~14× faster — implementation
+  headroom, not model cost).
 
 ---
 

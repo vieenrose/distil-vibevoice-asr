@@ -133,9 +133,8 @@ $("btn-load").onclick = () => {
   if (workerReady || loadKicked) return;
   loadKicked = true;
   primeDownloadBars(quality);
-  // a bare load: run with an empty tail so the worker just initializes
-  getWorker().postMessage({ type: "run", wav: new Float32Array(16000).buffer,
-                            quality, windowS: currentWindowS() });
+  // Preload WITHOUT the run lock so a file dropped mid-download isn't rejected.
+  getWorker().postMessage({ type: "load", quality });
 };
 
 /* ============================ transcript view ============================ */
