@@ -43,6 +43,29 @@ Base model: **MOSS-Transcribe-Diarize** — Whisper-Medium encoder (80-bin mel,
 4× time-merge, VQ-adaptor) + Qwen3-0.6B decoder; audio token id `151671`,
 12.5 audio-tokens/s; single-pass output stream `[start][Sxx]text[end]`.
 
+## What's different vs. the original MOSS-Transcribe-Diarize?
+
+Same architecture, very different deployment envelope. This project **fine-tunes**
+(not prunes) [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)
+— Whisper-medium encoder + Qwen3-0.6B decoder, 0.9B params, single-pass
+`[start][Sxx]text[end]` output, Apache-2.0 — and re-engineers everything around it:
+
+| | Original MOSS-TD 0.9B | This project (v6-stream lineage) |
+|---|---|---|
+| **Architecture / license** | Whisper-medium enc + Qwen3-0.6B dec · Apache-2.0 | identical (fine-tuned, nothing pruned) |
+| **Language & script** | general Mandarin, Simplified-leaning output | **Traditional Chinese (Taiwan)** enforced end-to-end + zh-TW/EN code-switch; conservative ITN |
+| **Domain** | general speech | real meetings: ~3 000 synthetic zh-TW meetings (TTS) + 55.8 h 立法院 IVOD with fused whisperX×pyannote labels (speaker-purity filtered) |
+| **Held-out zh-TW meeting MER** | 0.395* | **~0.18** (*script-normalized; part of the base gap is Simplified↔Traditional) |
+| **Long-meeting diarization (123 min)** | DER 0.74 | **DER 0.195 · consistency 0.905** (cross-window ECAPA/CAM++ linking) |
+| **Diarization under fine-tuning** | n/a (base) | defended: 8× speaker-tag CE + KL-anchor to base at `[Sxx]` positions — FT rounds no longer collapse speakers |
+| **Code-switch regression (ASCEND)** | reference | no regression; v6 improves all buckets vs v5 (all-MER 0.417 → **0.285**) |
+| **Long-audio decoding** | full attention, KV grows O(audio) | **streaming fine-tune: bounded 45 s audio-KV window** (monotonic eviction) — flat memory, ~20 % faster decode, DER parity via linking |
+| **Decode robustness** | — | engine guards: tick-stall loop breaker, speech-aware premature-EOS suppression, per-window watchdog + recovery |
+| **Quantization** | bf16 release | diarization-defended **q4 QAT** → q4_K_M GGUF (707 MB) · int8 ONNX (ternary/q3 measured & rejected; encoder-ternary in progress) |
+| **Runtimes** | HF transformers (GPU) | + **in-browser WASM** (multithread/iOS/WebGPU), native CPU C++ ([RapidSpeech.cpp](https://github.com/vieenrose/RapidSpeech.cpp)), Jetson Nano (CUDA 10.2/sm_53), sherpa-onnx, ONNX web |
+| **Live demos** | — | [WASM (fully local)](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-wasm) · [native C++ Space](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-cpp) |
+
+
 ## Reproducibility map (numbered scripts)
 
 All scripts are thin CLIs under `scripts/`; run with `.venv/bin/python`. Models
