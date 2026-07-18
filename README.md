@@ -26,8 +26,8 @@ transcription with **speaker diarization + timestamps**.
 
 | What | Where |
 |---|---|
-| Fine-tuned model (v6-stream, deployed) | [`Luigi/moss-transcribe-diarize-zhtw`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw) |
-| **GGUF quantized models** (q4_K_M, v5 + v6-stream) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
+| Fine-tuned model (v6.1, deployed) | [`Luigi/moss-transcribe-diarize-zhtw`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw) |
+| **GGUF quantized models** (q4_K_M, v5 / v6-stream / v6.1) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
 | **WASM browser demo** (ggml C++ engine, live) | [`Luigi/moss-transcribe-diarize-wasm`](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-wasm) (HF Space) |
 | **RapidSpeech.cpp engine** (WASM CPU/WebGPU + Jetson Nano CUDA ports) | [`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp) (`main` = WASM/CPU, `jetson-nano-gen1` = CUDA 10.2/sm_53) |
 | Quantized ONNX graphs (web / mobile / sherpa) | [`Luigi/moss-transcribe-diarize-zhtw-onnx`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-onnx) |
@@ -50,18 +50,18 @@ Same architecture, very different deployment envelope. This project **fine-tunes
 — Whisper-medium encoder + Qwen3-0.6B decoder, 0.9B params, single-pass
 `[start][Sxx]text[end]` output, Apache-2.0 — and re-engineers everything around it:
 
-| | Original MOSS-TD 0.9B | This project (v6-stream lineage) |
+| | Original MOSS-TD 0.9B | This project (v6.1 lineage) |
 |---|---|---|
 | **Architecture / license** | Whisper-medium enc + Qwen3-0.6B dec · Apache-2.0 | identical (fine-tuned, nothing pruned) |
 | **Language & script** | general Mandarin, Simplified-leaning output | **Traditional Chinese (Taiwan)** enforced end-to-end + zh-TW/EN code-switch; conservative ITN |
 | **Domain** | general speech | real meetings: ~3 000 synthetic zh-TW meetings (TTS) + 55.8 h 立法院 IVOD with fused whisperX×pyannote labels (speaker-purity filtered) |
 | **Held-out zh-TW meeting MER** | 0.395* | **~0.18** (*script-normalized; part of the base gap is Simplified↔Traditional) |
-| **Long-meeting diarization (123 min)** | DER 0.74 | **DER 0.195 · consistency 0.905** (cross-window ECAPA/CAM++ linking) |
+| **Long-meeting diarization (123 min)** | DER 0.74 | **DER 0.195 · consistency 0.905** (cross-window CAM++ linking v2: per-window tag-pooled units + cannot-link clustering — 2 h meeting 24→10 speakers) |
 | **Diarization under fine-tuning** | n/a (base) | defended: 8× speaker-tag CE + KL-anchor to base at `[Sxx]` positions — FT rounds no longer collapse speakers |
-| **Code-switch regression (ASCEND)** | reference | no regression; v6 improves all buckets vs v5 (all-MER 0.417 → **0.285**) |
+| **Code-switch regression (ASCEND)** | reference | no regression; each release improves: v5 0.417 → v6 0.285 → **v6.1 0.267** all-MER |
 | **Long-audio decoding** | full attention, KV grows O(audio) | **streaming fine-tune: bounded 45 s audio-KV window** (monotonic eviction) — flat memory, ~20 % faster decode, DER parity via linking |
-| **Decode robustness** | — | engine guards: tick-stall loop breaker, speech-aware premature-EOS suppression, per-window watchdog + recovery |
-| **Quantization** | bf16 release | diarization-defended **q4 QAT** → q4_K_M GGUF (707 MB) · int8 ONNX (ternary/q3 measured & rejected; encoder-ternary in progress) |
+| **Decode robustness** | — | engine guards: tick-stall loop breaker, advancing-clock cycle detector, slow-cycle collapse, speech-aware premature-EOS suppression, eviction-sized KV + capacity guard, per-window watchdog + recovery |
+| **Quantization** | bf16 release | diarization-defended **q4 QAT** → q4_K_M GGUF (707 MB) · int8 ONNX (ternary/q3 and encoder-ternary measured & rejected) |
 | **Runtimes** | HF transformers (GPU) | + **in-browser WASM** (multithread/iOS/WebGPU), native CPU C++ ([RapidSpeech.cpp](https://github.com/vieenrose/RapidSpeech.cpp)), Jetson Nano (CUDA 10.2/sm_53), sherpa-onnx, ONNX web |
 | **Live demos** | — | [WASM (fully local)](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-wasm) · [native C++ Space](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-cpp) |
 
@@ -90,6 +90,7 @@ steps below). Held-out eval meetings `15361/15362/15857` are **never** trained o
 | Fine-tune **v5** (diarization defense) | `40_ft_moss_v5.py` | `models/moss_ft_zhtw_v5*` — 8× speaker-tag CE + KL-anchor to base ([Sxx] distribution), optional diarization-defended QAT |
 | **Quant ladder** q4→q3→ternary | `52_qat_ladder.py` | k-bit STE QAT (`--bits 4/3/2`, `--freeze-rest`, anneal, self-KL) — negative result, see below |
 | Fine-tune **v6-stream** (streaming) | `53_streaming_ft.py` | `models/moss_ft_zhtw_v6_stream3` — bounded 45 s audio-KV window (4D eviction mask + frozen full-attention teacher KL + silence-tail aug) |
+| Fine-tune **v6.1** (marker density) | `55_v61_marker_ft.py` | `models/moss_ft_zhtw_v6_1` — v6-stream recipe + sentence-cadence time-marker supervision (deployed) |
 | **Demo build** | `37_build_space_example.py`, `43_dump_web_assets.py` | precomputed examples + browser assets |
 
 ## Fine-tuning recipe (v1 → v4)
@@ -106,6 +107,7 @@ cosine LR, single GPU. Target format `[start][Sxx]text[end]`, Traditional text.
 | **v4** | v3 data with **speaker-coverage purity filter** (`38`), 2000 steps | ~0.18 | **0.195 / 0.905** *(recovered)* |
 | **v5** | 8× speaker-tag CE + **KL-anchor to base at [Sxx] positions** (`40`) | ~0.18 | speaker count restored to base (3/3 on held-out 5-min) |
 | **v6-stream** | streaming FT: bounded 45 s audio-KV window (`53`), silence-tail aug, speaker-position KL | ASCEND all buckets **better than v5** (0.285 vs 0.417 all) | linked DER 0.132 ≈ v5's 0.128 |
+| **v6.1** | marker-density FT (`55`): long pseudo-label segments split to ~8 s sentence cadence with interpolated timestamps | ASCEND **0.267** all (en 0.471→0.438, zh flat) | dense-speech time markers 1 → **18–20** per 180 s window |
 
 \* base-model gap is largely the Simplified↔Traditional script mismatch.
 
@@ -130,6 +132,19 @@ BPE merges across `[end][start]`); window curriculum 120→75→45 s; frozen
 full-attention teacher KL (all positions + extra weight on speaker positions);
 **silence-tail augmentation** (without it the FT hallucinates speech after the
 meeting ends — the base model didn't).
+
+**v6.1 (deployed)**: fixes the *marker-less dense-speech* failure found on a
+2 h council recording — on dense continuous speech (no pauses) v6 emitted one
+leading `[0.00]` and then **no time markers for minutes**, collapsing the
+transcript's time axis. Root cause was supervision: the pseudo-label
+manifests' median segment is 18.7 s / 90 chars (and mostly unpunctuated), so
+sentence-cadence marker emission was never taught. `55_v61_marker_ft.py`
+densifies training targets — long segments are split into ~8 s pieces via a
+sentence-punct → clause-punct → char-count cascade with character-proportional
+interpolated timestamps — and re-runs the v6-stream recipe on top of
+v6-stream3. Result: 18–20 monotone markers on a formerly marker-less 180 s
+window, dense-window quality unchanged, and ASCEND *improved*
+(all 0.285 → **0.267**, en 0.471 → 0.438, zh flat).
 
 ## Quantization ladder: q4 wins, q3 and ternary are dead ends (measured)
 
@@ -260,8 +275,11 @@ fork — full MOSS-TD architecture (Whisper-medium encoder + Qwen3 decoder +
   2 h run).
 - **KV policy**: engine default f16 KV (half the memory of f32, sub-second
   timestamps preserved; q8 KV snaps timestamps to whole seconds). Long
-  browser windows use **45 s audio-KV eviction** (v6-stream model) instead of
-  q8: flat heap at full f16 precision.
+  browser windows use **45 s audio-KV eviction** (engine default; v6.x
+  models) instead of q8: flat heap at full f16 precision. The KV buffer is
+  **sized to the eviction window** (300 s window: 728 → 530 MB) with a
+  capacity guard that force-evicts the oldest audio if a timestamp-free
+  decode fills it.
 - **Jetson Nano gen1** (`jetson-nano-gen1` branch): CUDA 10.2 / sm_53 /
   C++14 / old-ggml adaptation; measured-best split is GPU encode + GPU
   prefill + CPU decode (GPU decode is host-KV-staging bound). Eviction
