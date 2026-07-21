@@ -1,326 +1,187 @@
-# distil-vibevoice-asr → MOSS-Transcribe-Diarize zh-TW
+# distil-vibevoice-asr → MOSS-Transcribe-Diarize zh-TW/EN
 
 On-device **zh-TW (Traditional Chinese, Taiwan) / English** meeting
-transcription with **speaker diarization + timestamps**.
+transcription with **speaker diarization + timestamps**, built on
+**[OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)**
+(0.9B, Whisper-medium encoder + Qwen3-0.6B decoder, Apache-2.0).
 
-> ## ⚠️ Status: the VibeVoice distillation path is DEPRECATED
+> ## Status (2026-07-21): purification-first rebuild, replacing the earlier fine-tuned lineage
 >
-> This repo started as a prune-and-distill of **microsoft/VibeVoice-ASR** (8.7B →
-> 1.5B). That work is preserved below (§"Deprecated: VibeVoice-ASR distillation")
-> for the record, but it is **superseded** by fine-tuning
-> **[OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)**
-> (0.9B, Apache-2.0). Why the pivot:
-> - **Quality**: per its paper, MOSS beats VibeVoice-ASR-8.7B on every ASR
->   benchmark (e.g. AISHELL-4 CER 14.84 vs 21.40; podcast 5.97 vs 27.94).
-> - **Size**: 0.9B natively vs a 1.5B distillation target — smaller *and*
->   better, no multi-stage prune/distill cascade needed.
-> - **License**: Apache-2.0 (VibeVoice-ASR is research-only).
-> - **Same output contract**: speaker-attributed, timestamped segments in one
->   pass (`[start][Sxx]text[end]`), which is the product requirement.
->
-> **Everything published and live is the MOSS adaptation.** The VibeVoice code
-> (`src/distil_vibevoice/{pruning,distill}`, `configs/`) remains importable and
-> its 252 CPU tests pass, but it is not the maintained path.
+> Two prior approaches are **superseded** and kept below for the record only:
+> a VibeVoice-ASR distillation (§"Deprecated: VibeVoice-ASR distillation") and
+> a fine-tuned MOSS-TD lineage (v1–v7, harness-laden windowed pipeline). Both
+> were abandoned in favour of the plan below, after the fine-tuned lineage was
+> found to be over-specialised and structurally fragile relative to the base
+> model. **No fine-tuning happens anywhere in the current pipeline.** The base
+> model is used as published; all engineering effort goes into a byte-verified
+> C++ port, a minimal windowed pipeline, and quantization — each stage gated
+> against measurement, not assumption.
 
-## Published artifacts (MOSS adaptation)
+## Live demo
+
+**[Luigi/moss-transcribe-diarize-cpp](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-cpp)**
+— native C++ (ggml, CPU) on the HF Space, windowed pipeline + cross-window
+speaker linking, mixed-precision Q8_0 weights (1.55 GB). The former WASM demo
+(`Luigi/moss-transcribe-diarize-wasm`) is now **private** — its `campplus.gguf`
+dependency was rehosted to the model repo below, and it predates the current
+engine; it is not being maintained as a second front end right now.
+
+## The four-stage plan
+
+Each stage is gated by measurement before the next begins. Full detail,
+including every rejected candidate and why, lives in project memory
+(`project-staged-delivery` — not in this repo, but summarised here).
+
+### Stage 1 — byte-identical C++ port. **Done.**
+
+The engine is [`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp)
+branch **`moss-pure`**, which vendors
+[`localai-org/moss-transcribe.cpp`](https://github.com/localai-org/moss-transcribe.cpp)
+(MIT) **unmodified**. `moss-pure` starts from the commit *before* the original
+MOSS-TD work was ever added to that fork — it carries none of the harnesses
+(audio-KV eviction, repetition penalty, EOS-coverage suppression, loop guards,
+speaker-linking-by-fiat) that accumulated around the fine-tuned lineage. The
+whole point of this stage was to separate "what the model actually does" from
+"what a decade of patches made it look like it does."
+
+Byte-identity gate, verified non-windowed, single pass, no post-processing:
+
+| reference | f16 GGUF | f32 GGUF (pinned ISA) |
+|---|---|---|
+| PyTorch f32 | differs (near-tie flips vary by CPU SIMD width) | **byte-identical**, CPU and CUDA |
+| PyTorch bf16 / f16 | not used as reference — see below | — |
+
+Two findings that made the gate meaningful rather than accidental:
+- **The reference must be f32.** bf16 (what the model authors' own README runs
+  on CUDA) has an 8-bit mantissa vs f16's 10 — it is *less* precise than the
+  port it would be judging, and diverges at near-ties. PyTorch-f16 diverges
+  too (different accumulation order).
+- **The build's ISA must be pinned**, not `-march=native`. The same source
+  built on two machines can select different SIMD kernels and flip a
+  near-tied token — measured directly (one timestamp in 92 differed between a
+  local build and the HF Space's CPU). `GGML_NATIVE=OFF`, explicit
+  `x86-64-v3` (AVX2+FMA+F16C), `GGML_LLAMAFILE=ON` (required — off, one more
+  near-tie flips).
+
+Quantization is **not** part of stage 1: f32 was the gate; smaller weights are
+a stage-3 decision, re-gated on their own terms (below).
+
+### Stage 2 — windowed pipeline + cross-window speaker linking. **Done, deployed.**
+
+Long audio initially looked like it needed windowing to avoid truncation —
+it didn't; the real cause was the GGUF's fixed 5120-token generation cap
+(from `generation_config.json`), which a duration-scaled budget fixes with no
+windowing at all (coverage 67%→100%, WER 0.552→0.161 on a 16-min meeting).
+Windowing was kept anyway, once measured to be a genuine efficiency win: **3.3×
+faster, ~half the peak memory** vs single-pass on real 16-minute meetings —
+and it is required for meetings measured in hours, where a single continuous
+decode's KV cache and attention span both grow unbounded.
+
+- **Window length: fixed at 90s**, chosen after a sweep (60/90/180/300/450s)
+  scored two ways — WER/speaker-accuracy against real AMI ground truth (EN),
+  and a **turn-crossing check** (does a merged segment ever span a genuine
+  speaker change, vs legitimately combine consecutive same-speaker utterances)
+  against a validated windowless reference (zh, which has no independent
+  ground truth). 90s is the best point found for zh and not distinguishable
+  from other lengths for en.
+- **Cross-window speaker identity** is not tracked by the model at all — each
+  window's `[Sxx]` tags reset independently. Fixed with CAM++ (unmodified,
+  from RapidSpeech.cpp's `rapidspeech-core`): pool each window-local speaker's
+  audio into one embedding (per-utterance embedding fragmented badly — most
+  utterances are under 2s, too little audio for a stable embedding), then
+  **constrained agglomerative clustering** with a *cannot-link* prior (two
+  speakers active in the same window are provably distinct — enforced as a
+  soft penalty, not a hard rule, since the engine occasionally over-splits one
+  real speaker within a window). An earlier greedy streaming version let one
+  bad merge cascade through a running-mean centroid, corrupting two real
+  speakers into one identity (68% accuracy); the constrained version fixed it
+  to 99%+.
+- **Streaming audio reader.** The pipeline never holds more than one window's
+  audio in memory — verified peak RSS flat at ~0.76 GB from 16 minutes to
+  2h3min of real audio (a naive whole-file-in-memory version grew ~3.8 MB per
+  minute of audio). Verified byte-identical output vs the non-streaming path
+  before shipping.
+
+**Validated at scale, and the headline number needed correcting.** Tuned and
+first validated on one AMI meeting (WER 0.150, speaker accuracy 99.4%). Tested
+on 6 diverse real meetings (4 recording sites) plus two multi-hour real
+sessions (87.5 min, 2h03min): **mean WER across the 6 meetings is 0.262 — the
+single-meeting number was not representative.** Confirmed via windowless
+control that this gap is base-model accuracy varying by meeting, not
+something windowing/linking introduces (windowless scores the same on the
+hard meetings). No crashes across ~4 hours of new audio tested.
+
+### Stage 3 — quantization at equal accuracy. **Done, deployed.**
+
+Deployed: **mixed-precision Q8_0**, 1.55 GB (2.3× smaller than f32).
+
+Uniform Q8_0 (0.99 GB) looked fine on short clips and on text-similarity
+metrics (93% char agreement) — but on a 16-minute Chinese meeting it silently
+stopped emitting utterance boundaries: 69 segments where the reference emits
+312. Bisected by holding one tensor family at f16 and the rest at Q8_0 (and
+the inverse): **`token_embd.weight`** alone reproduces the collapse, and the
+**full Qwen3 decoder** (attention + FFN together) collapses too even though
+each half is individually clean — a compounding effect, not one tensor. The
+Whisper encoder and audio adaptor tolerate Q8_0 with zero measured damage.
+
+Fix: hold `token_embd` + the full decoder at f16, quantize encoder + adaptor
+to Q8_0 → 312/312 utterances (100.00% text agreement with f32), byte-identical
+to f32 on the zh 5-minute golden clip, at 1.55 GB. Pushed further down
+(encoder@q6_k/q5_k/q4_k) — all rejected: quality is **non-monotonic** with
+bit-width (q5_k measured *worse* than q4_k), and q6_k costs real English
+accuracy for only 10% additional size savings. No safe stopping point found
+below Q8_0 for the encoder.
+
+KV-cache optimization (eviction, KV quantization) was evaluated and found
+**not worth doing**: windowing already bounds the engine's KV cache at 90s of
+context, so there's little left to save.
+
+### Stage 4 — audit the existing zh-TW/EN training data. **In progress.**
+
+Reviewing `data/pseudo/ivod_ft_v4.jsonl` (131 real 立法院 sessions, ~97 audio
+hours) on four axes: transcript correctness, timestamp accuracy, speaker-tag
+accuracy, utterance-segmentation correctness. Review only — no training
+implied by this stage. Findings so far:
+- **Coverage confirmed as the headline defect, still current**: 57.8% mean /
+  58.7% median session-level label coverage (p10: 43.7%) — unlabelled gaps
+  are largely real speech, not silence.
+- **The existing labels were not produced by MOSS-TD** (`"source":
+  "ivod_wx_py"` in the manifest — a WhisperX-based pipeline predating this
+  project's MOSS-TD work). Cross-checking against the now-validated pure
+  engine's own output is in progress.
+
+## Engine and demo repo map
 
 | What | Where |
 |---|---|
-| Fine-tuned model (v7, deployed) | [`Luigi/moss-transcribe-diarize-zhtw`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw) |
-| **GGUF quantized models** (q4_K_M, v5 / v6-stream / v6.1 / **v7**) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
-| **WASM browser demo** (ggml C++ engine, live) | [`Luigi/moss-transcribe-diarize-wasm`](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-wasm) (HF Space) |
-| **RapidSpeech.cpp engine** (WASM CPU/WebGPU + Jetson Nano CUDA ports) | [`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp) (`main` = WASM/CPU, `jetson-nano-gen1` = CUDA 10.2/sm_53) |
-| Quantized ONNX graphs (web / mobile / sherpa) | [`Luigi/moss-transcribe-diarize-zhtw-onnx`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-onnx) |
-| ONNX browser demo | [`Luigi/zh-tw-transcriber-local`](https://huggingface.co/spaces/Luigi/zh-tw-transcriber-local) (HF Space) |
-| Precomputed long-meeting viewer | [`Luigi/zh-tw-meeting-transcriber`](https://huggingface.co/spaces/Luigi/zh-tw-meeting-transcriber) |
-| sherpa-onnx C++ runtime port | [`vieenrose/sherpa-onnx@feature/moss-transcribe-diarize`](https://github.com/vieenrose/sherpa-onnx/tree/feature/moss-transcribe-diarize) |
+| **Pure C++ engine** (byte-identical, MIT-vendored) | [`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp) branch `moss-pure` |
+| **Live demo** (windowed + linked, deployed) | [`Luigi/moss-transcribe-diarize-cpp`](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-cpp) |
+| **GGUF weights** (f32 gate reference, deployed q8mix, campplus) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
+| Reference conversion tooling / parity suite (cited, not vendored) | [`localai-org/moss-transcribe.cpp`](https://github.com/localai-org/moss-transcribe.cpp) (MIT) |
+
+The model repo above also still carries GGUF artifacts from the abandoned
+fine-tuned lineage (`moss-td-zhtw-v5kl…v71-*`) — kept for reference, **not**
+part of the current pipeline; only `moss-transcribe-base-f32.gguf`,
+`moss-transcribe-base-q8mix.gguf`, and `campplus*.gguf` are live.
+
+## Open items
+
+- **RapidSpeech.cpp has no LICENSE file** (neither this fork nor
+  `RapidAI/RapidSpeech.cpp` upstream). The ASR engine itself has zero
+  unlicensed dependency (verified via `ldd`: only MIT ggml + the vendored MIT
+  port). Cross-window speaker linking (`rapidspeech-core`, for CAM++) does
+  pull in the surrounding unlicensed upstream tree as build dependencies —
+  shipped as an accepted, explicit risk on that one feature, documented in
+  `windowing.py`/`app.py` in the Space repo.
+- Stage 3's CPU-side profiling (prefill/decode breakdown, thread-count sweep,
+  NUMA pinning) has not been done — everything was profiled on CUDA first per
+  standing instruction; the deployed demo runs CPU-only.
+- Stage 4 audit is in progress; findings above are partial.
 
 ---
-
-# MOSS-Transcribe-Diarize zh-TW adaptation (current work)
-
-Base model: **MOSS-Transcribe-Diarize** — Whisper-Medium encoder (80-bin mel,
-4× time-merge, VQ-adaptor) + Qwen3-0.6B decoder; audio token id `151671`,
-12.5 audio-tokens/s; single-pass output stream `[start][Sxx]text[end]`.
-
-## What's different vs. the original MOSS-Transcribe-Diarize?
-
-Same architecture, very different deployment envelope. This project **fine-tunes**
-(not prunes) [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize)
-— Whisper-medium encoder + Qwen3-0.6B decoder, 0.9B params, single-pass
-`[start][Sxx]text[end]` output, Apache-2.0 — and re-engineers everything around it:
-
-| | Original MOSS-TD 0.9B | This project (v7 lineage) |
-|---|---|---|
-| **Architecture / license** | Whisper-medium enc + Qwen3-0.6B dec · Apache-2.0 | identical (fine-tuned, nothing pruned) |
-| **Language & script** | general Mandarin, Simplified-leaning output | **Traditional Chinese (Taiwan)** enforced end-to-end + zh-TW/EN code-switch; conservative ITN |
-| **Domain** | general speech | real meetings: ~3 000 synthetic zh-TW meetings (TTS) + 55.8 h 立法院 IVOD with fused whisperX×pyannote labels (speaker-purity filtered) |
-| **Held-out zh-TW meeting MER** | 0.395* | **~0.18** (*script-normalized; part of the base gap is Simplified↔Traditional) |
-| **Long-meeting diarization (123 min)** | DER 0.74 | **DER 0.195 · consistency 0.905** (cross-window CAM++ linking v2: per-window tag-pooled units + cannot-link clustering — 2 h meeting 24→10 speakers) |
-| **Diarization under fine-tuning** | n/a (base) | defended: 8× speaker-tag CE + KL-anchor to base at `[Sxx]` positions — FT rounds no longer collapse speakers |
-| **Code-switch regression (ASCEND, fp16)** | reference | no regression; each release improves: v5 0.417 → v6 0.285 → v6.1 0.267 all-MER (v7 QAT is q4-native — see q4 numbers below) |
-| **Long-audio decoding** | full attention, KV grows O(audio) | **streaming fine-tune: bounded 45 s audio-KV window** (monotonic eviction) — flat memory, ~20 % faster decode, DER parity via linking |
-| **Decode robustness** | — | engine guards: tick-stall loop breaker, advancing-clock cycle detector, slow-cycle collapse, speech-aware premature-EOS suppression, eviction-sized KV + capacity guard, per-window watchdog + recovery |
-| **Quantization** | bf16 release | diarization-defended **q4 QAT** → q4_K_M GGUF (707 MB) · int8 ONNX (ternary/q3 and encoder-ternary measured & rejected) |
-| **Runtimes** | HF transformers (GPU) | + **in-browser WASM** (multithread/iOS/WebGPU), native CPU C++ ([RapidSpeech.cpp](https://github.com/vieenrose/RapidSpeech.cpp)), Jetson Nano (CUDA 10.2/sm_53), sherpa-onnx, ONNX web |
-| **Live demos** | — | [WASM (fully local)](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-wasm) · [native C++ Space](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-cpp) |
-
-
-## Reproducibility map (numbered scripts)
-
-All scripts are thin CLIs under `scripts/`; run with `.venv/bin/python`. Models
-live in `models/` and data in `data/` (both git-ignored — regenerate via the
-steps below). Held-out eval meetings `15361/15362/15857` are **never** trained on.
-
-| Stage | Script | Produces |
-|---|---|---|
-| **Real data** — collect IVOD | `01b_collect_ivod.py` | `data/raw/ivod_*/` + manifest (robust dead-air skip via `robust_speech_start`) |
-| Fuse real labels | `38_build_ivod_targets.py` | `data/pseudo/ivod_ft_v4.jsonl` — whisperx×pyannote fused, speaker-coverage purity filter (131 mtgs / 55.8 h) |
-| **Synthetic data** — scripts | `dialogue_scripts.py` (12 domains) | code-switched zh-TW/en meeting scripts |
-| TTS meetings | `24_bulk_tts.py` (VibeVoice community fork, `.venv_tts`) | `data/pseudo/tts_all.jsonl` (~3000 mtgs, exact labels) |
-| **Fine-tune** v1/v2 | `27_ft_moss.py` | `models/moss_ft_zhtw{,_v2}` (SFT, CE on assistant tokens) |
-| Fine-tune v3/v4 | `39_ft_moss_v3.py` | `models/moss_ft_zhtw_v4` — 300 s windows, mix 40% clean / 30% RIR+MUSAN-aug / 30% real IVOD |
-| **Eval** synthetic MER | `26_eval_moss.py` | held-out MER/DER |
-| Long-clip gates | `36_dump_moss_outputs.py` → `40_eval_longclip.py` | leakage / tag-drop / DER / consistency at 90/180/300 s |
-| Base-domain regression | `45_regression_base_domains.py` | ASCEND zh/en/mixed MER vs base (guards forgetting) |
-| **Diarization** linking sweep | `34b`/`51_linking_sweep.py` | best cross-window linking config |
-| **On-device** ONNX export | `30_export_moss_onnx.py` (`--last-logits`, `--fp16-kv`), `31_export_moss_qwen3style.py` | web / sherpa decoder graphs (parity-checked) |
-| Web quantization | `41_quantize_web.py`, `44_export_ecapa_onnx.py` | int8 / q4 graphs, ECAPA ONNX (conv-DFT STFT, cosine 1.0000) |
-| QAT + mixed-precision | `48_q4_sensitivity.py` (NAS) → `49_qat_q4.py` → `50_export_q4_mixed.py` | quantization-robust q4 |
-| Fine-tune **v5** (diarization defense) | `40_ft_moss_v5.py` | `models/moss_ft_zhtw_v5*` — 8× speaker-tag CE + KL-anchor to base ([Sxx] distribution), optional diarization-defended QAT |
-| **Quant ladder** q4→q3→ternary | `52_qat_ladder.py` | k-bit STE QAT (`--bits 4/3/2`, `--freeze-rest`, anneal, self-KL) — negative result, see below |
-| Fine-tune **v6-stream** (streaming) | `53_streaming_ft.py` | `models/moss_ft_zhtw_v6_stream3` — bounded 45 s audio-KV window (4D eviction mask + frozen full-attention teacher KL + silence-tail aug) |
-| Fine-tune **v6.1** (marker density) | `55_v61_marker_ft.py` | `models/moss_ft_zhtw_v6_1` — v6-stream recipe + sentence-cadence time-marker supervision |
-| Fine-tune **v7** (QAT, deployed) | `56_v62_qat.py --kl-weight 0 --spk-kl-weight 0` | `models/moss_ft_zhtw_v7` — CE-only int4 QAT restoring q4-robustness |
-| **q4-level ASCEND** eval | `57_ascend_gguf.py` | MER on the actual GGUF (deployment quant) via `moss-td-test` |
-| **Demo build** | `37_build_space_example.py`, `43_dump_web_assets.py` | precomputed examples + browser assets |
-
-## Fine-tuning recipe (v1 → v4)
-
-SFT, cross-entropy on assistant tokens only, bf16, gradient checkpointing,
-cosine LR, single GPU. Target format `[start][Sxx]text[end]`, Traditional text.
-
-| Ver | Change | Held-out MER | Real 123-min DER / consistency |
-|---|---|---|---|
-| base | — | 0.395* | 0.74 / — |
-| v1 | 400 steps @ lr 1e-5 | 0.201 | — |
-| **v2** | +2000 steps @ 5e-6 | **0.183** | 0.180 / — |
-| v3 | 300 s windows + real IVOD (30 %), 3000 steps | 0.18 | 0.244 / 0.814 *(diarization regressed)* |
-| **v4** | v3 data with **speaker-coverage purity filter** (`38`), 2000 steps | ~0.18 | **0.195 / 0.905** *(recovered)* |
-| **v5** | 8× speaker-tag CE + **KL-anchor to base at [Sxx] positions** (`40`) | ~0.18 | speaker count restored to base (3/3 on held-out 5-min) |
-| **v6-stream** | streaming FT: bounded 45 s audio-KV window (`53`), silence-tail aug, speaker-position KL | ASCEND all buckets **better than v5** (0.285 vs 0.417 all) | linked DER 0.132 ≈ v5's 0.128 |
-| **v6.1** | marker-density FT (`55`): long pseudo-label segments split to ~8 s sentence cadence with interpolated timestamps | ASCEND **0.267** all (en 0.471→0.438, zh flat) | dense-speech time markers 1 → **18–20** per 180 s window |
-| **v7 (deployed)** | **CE-only QAT** of v6.1 (`56`, `--kl-weight 0`): int4 fake-quant, no teacher-KL | **q4** ASCEND all **0.317 vs v6.1-q4 0.352** (`57`) | fixes the dense-speech **repetition loop at the q4 weight level** |
-
-\* base-model gap is largely the Simplified↔Traditional script mismatch.
-
-**Key v4→v5 fix**: transcription-focused FT rounds progressively *forgot* the
-base model's speaker separation (base 3 → v4 1 speakers on a held-out 5-min
-meeting) — [Sxx] tags are a tiny token fraction, so uniform CE happily trades
-them away. Weighted CE alone couldn't restore voice discrimination (the model
-games CE via turn-taking cues); the fix is KL-anchoring the *speaker-tag
-distribution* to a frozen base teacher. The same defense is kept through QAT
-("diarization-defended QAT") and the v6 streaming FT.
-
-**v6-stream (deployed)**: fine-tuned so decode works with a **bounded 45 s
-audio-KV window** (monotonic eviction in the engine): audio KV memory is O(45 s)
-instead of O(meeting), per-token attention cost is constant, decode ~20 %
-faster, sub-second timestamps preserved. Under the bounded window the model
-cannot re-identify voices older than 45 s and correctly assigns fresh local
-[Sxx] ids — global identity is restored by the ECAPA/CAM++ linking stage, so
-streaming diarization is gated on **linked** DER (0.132 vs full-attention v5's
-0.128 = parity). Recipe essentials (all needed): 4D eviction attention mask
-built via `offset_mapping` (per-segment tokenizations do *not* concatenate —
-BPE merges across `[end][start]`); window curriculum 120→75→45 s; frozen
-full-attention teacher KL (all positions + extra weight on speaker positions);
-**silence-tail augmentation** (without it the FT hallucinates speech after the
-meeting ends — the base model didn't).
-
-**v6.1 (deployed)**: fixes the *marker-less dense-speech* failure found on a
-2 h council recording — on dense continuous speech (no pauses) v6 emitted one
-leading `[0.00]` and then **no time markers for minutes**, collapsing the
-transcript's time axis. Root cause was supervision: the pseudo-label
-manifests' median segment is 18.7 s / 90 chars (and mostly unpunctuated), so
-sentence-cadence marker emission was never taught. `55_v61_marker_ft.py`
-densifies training targets — long segments are split into ~8 s pieces via a
-sentence-punct → clause-punct → char-count cascade with character-proportional
-interpolated timestamps — and re-runs the v6-stream recipe on top of
-v6-stream3. Result: 18–20 monotone markers on a formerly marker-less 180 s
-window, dense-window quality unchanged, and ASCEND *improved*
-(all 0.285 → **0.267**, en 0.471 → 0.438, zh flat).
-
-**v7 (deployed) — QAT restores q4-robustness.** A 2 h council recording
-surfaced a **repetition loop**: on dense continuous speech with a genuinely
-repetitive phrase, the q4 model spiraled into hundreds of copies. Root-caused
-by bisect: base MOSS and **v5-kl-QAT are clean; v6-stream and v6.1 loop** —
-the bf16 streaming/marker fine-tunes trained away the q4 quantization-robustness
-that v5's QAT had. The loop manifests **only at q4** (f16 clean) and only on
-long windows (≥300 s). Fix = **continue v6.1 with CE-only QAT** (int4 STE
-fake-quant on the decoder Linears, `56_v62_qat.py --kl-weight 0
---spk-kl-weight 0 --lr 2e-6`). The critical finding: **teacher-KL and
-fake-quant are antagonistic** — forcing an int4 student to match a
-full-precision distribution destabilizes training (earlier KL-laden QAT runs
-degraded badly, emitting garbage tokens); dropping the KL and training pure CE
-(v5's proven recipe) fixes the loop at the weight level while preserving
-quality. v7 q4-level ASCEND (`57_ascend_gguf.py`, evaluated on the actual
-GGUF): **all 0.317 vs v6.1-q4 0.352** — a net improvement, big English gain,
-meeting-domain fixtures unchanged. Note: QAT loss (~0.5) is intentionally
-higher than v6.1's fp loss (~0.3) — it measures the *quantized* model, so the
-extra ~0.2 is the q4 penalty made honest, not a quality regression. A
-quant-scheme band-aid (mixed-precision q6 on the most q4-sensitive layers) was
-tried and **rejected**: it fixed one window and degraded another, confirming
-the fragility lives in the weights and must be fixed by training, not
-quantization scheme. An engine-side loop breaker (RapidSpeech.cpp
-`MossLoopGuard`, unit-tested) is retained as belt-and-suspenders.
-
-## Quantization ladder: q4 wins, q3 and ternary are dead ends (measured)
-
-`52_qat_ladder.py` generalizes the q4 QAT to k-bit (bits=2 → block-scaled
-ternary, BitNet b1.58 format). Findings on the 0.6B decoder (native CPU, 8T):
-
-| rung | decode | CER / DER | verdict |
-|---|---|---|---|
-| q4_K_M (QAT) | 7.8 tok/s | 11.0 % / 0.12 | **shipped** |
-| q3_K FFN | 7.0 tok/s | ~11 % / 0.076 | dead: file *bigger* than q4 (k-quant bumps) + slower kernel |
-| ternary FFN (TQ2_0) | ~2.1× q4 (kernel bench) | ~21 % / 0.18+ | dead: capacity wall |
-
-Three independent ternary recipes (freeze-rest; co-train + self-KL + 4→3→2
-anneal + sensitivity-spared layers; CE-only + anneal) all converge to ~21 CER =
-**the 0.6B decoder cannot absorb ternary-FFN damage at fine-tuning scale** —
-a capacity wall, not a training bug. Two transferable QAT lessons:
-(1) fake-quantizing a *subset* of layers while training *all* params lets the
-unquantized params absorb the error — loss looks great, the deployed subset is
-PTQ-garbage; freeze everything but the quantized latents (`--freeze-rest`),
-which needs ~10× the LR. (2) self-distill KL against your *own* unquantized
-weights diverges (moving target); use CE or a frozen teacher.
-
-**Key v3→v4 fix**: v3's fused IVOD labels allowed segments spanning speaker
-turns, teaching merged-turn output (consistency 0.912→0.814). A 15 s length cap
-was not viable (median whisperx segment is 18 s → keeps only 15 % of speech);
-instead the winning pyannote speaker must cover ≥70 % of the segment span
-(`38_build_ivod_targets.py`). This dropped exactly the boundary-crossers and
-recovered diarization.
-
-## Evaluation principles
-
-- **Script-normalize before scoring.** MER/CER are computed after converting
-  both hyp and reference to one script (OpenCC), so Traditional-vs-Simplified
-  output is not counted as a recognition error.
-- **Separate repairable from irreparable metrics.** Simplified-script leakage
-  and number formatting are fixed deterministically in post (see below) — they
-  are reported but do **not** gate publication. Recognition (MER), diarization
-  (DER / consistency), timestamps, and base-domain regression (ASCEND) do.
-- **Always check base-domain regression.** Every fine-tune is scored on ASCEND
-  (real zh/en conversational code-switch) vs the base model, so a zh-TW FT can't
-  silently degrade the base model's general ASR.
-
-## Long-meeting diarization
-
-MOSS is single-pass; long audio is processed in windows and speakers are linked
-across them (`src/distil_vibevoice/runtime/`):
-
-1. Transcribe each window (`[start][Sxx]…` labels are only consistent *within* a
-   window).
-2. Embed every segment with **ECAPA-TDNN** (`runtime/embeddings.py`).
-3. One global agglomerative-clustering pass (`runtime/linking.py`: core segments
-   ≥3 s at cosine 0.45 average-linkage, short segments → nearest centroid) gives
-   one consistent speaker set across the whole meeting.
-
-Validated vs pyannote references on real meetings: **DER 0.056** (30-min,
-7/8 speakers), **consistency 0.905** (123-min, 300 s windows). Window size is a
-measured accuracy↔speed tradeoff: 90 s ≈ 180 s on diarization; only 300 s is
-meaningfully better on very long meetings (consistency 0.905 vs 0.87), and the
-180 s→300 s gap is **intrinsic to window context, not linker-fixable**
-(`51_linking_sweep.py` recovers only ~0.003 of the 0.032 gap).
-
-## Written-form post-processing (deterministic, recognition unchanged)
-
-An acoustic model can't reliably learn script choice or number place-value, so
-these are rule modules applied after decoding:
-
-- **`runtime/lenient_parser.py`** — accepts `[start]text[end]` without an
-  `[Sxx]` tag (real far-field audio drops it) and inherits the previous speaker;
-  the strict parser otherwise discards whole windows.
-- **OpenCC `s2tw`** — Simplified→Traditional (pure script conversion; never
-  `s2twp`, which would corrupt proper nouns like 高端疫苗).
-- **`data/itn.py`** — conservative inverse text normalization via `cn2an`
-  (二十三→23, 百分之五十→50%) with idiom guards (千萬, 百分之百, …) and
-  ordinal protection (第八/第一 stay words). A JS port (`space_local/itn.js`) is
-  differential-tested byte-identical.
-
-## On-device: ONNX, quantization, QAT
-
-- **Export** (`30`, `31`): 3-graph web layout (encoder / embedding / decoder
-  with dynamic KV) and sherpa fixed-KV layout; `--last-logits` (lm_head on the
-  final position only — the full-prefill logits are a ~1.4 GB tensor in 32-bit
-  wasm), optional `--fp16-kv`. All parity-checked vs PyTorch.
-- **Quantization** (`41`, `44`): encoder int8 (MatMul-only — `ConvInteger`
-  unsupported in ORT CPU/web), embedding int8, decoder int8 / q4 (MatMulNBits
-  block-32 symmetric); ECAPA exported with a conv1d-DFT replacing `torch.stft`
-  (parity cosine 1.0000).
-- **Accuracy (script-normalized MER vs bf16 FT)**: int8 **0.03–0.04**; naive q4
-  0.068; **QAT-q4 0.077→ near int8** after quantization-aware fine-tuning.
-- **QAT + NAS** (`48`/`49`/`50`): STE int4 fake-quant matching MatMulNBits
-  (`src/distil_vibevoice/quant/fakequant.py`); a layer sensitivity probe (the
-  "NAS" — last layer + lm_head are most q4-sensitive) informs a mixed-precision
-  export. **int8 is the shipped choice** (q4 saved only ~19 % of download for a
-  real accuracy hit; accuracy is the priority).
-
-## Browser demo (`space_local/`)
-
-Fully-local: int8 ONNX + `onnxruntime-web` in a **Web Worker** (page never
-freezes), any-length windowed audio + ECAPA linking, streaming transcript with
-a liveness heartbeat, s2tw + ITN, SRT/JSON export. Weights and example media are
-served from the ONNX model repo (HF Space storage is code-only). CPU-only —
-WebGPU was dropped; cross-origin isolation for wasm threads via a COI service
-worker. `space_local/pipeline.js` is the reference JS pipeline (env-agnostic;
-node-validated against the Python sim `42_web_pipeline_sim.py`).
-
-## sherpa-onnx C++ port
-
-The native runtime lives in the fork branch above: MOSS-SATS offline recognizer
-(adapted from the qwen3-asr impl), a character-state-machine SATS parser
-(differential-tested byte-exact vs the Python reference), windowed decoding
-(`--moss-sats-window-seconds`, default 300 — single-pass degenerates beyond
-~4–5 min), int8 graphs.
-
-## RapidSpeech.cpp port (ggml C++): WASM demo + Jetson Nano
-
-The maintained native runtime is the
-[`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp)
-fork — full MOSS-TD architecture (Whisper-medium encoder + Qwen3 decoder +
-`[start][Sxx]text[end]` parsing) on ggml, from one q4_K_M GGUF.
-
-- **WASM browser demo** (`main` branch, live Space above): multithreaded
-  wasm + relaxed-SIMD variant, WebGPU option, iOS build (1.5 GB heap cap,
-  iterative graph build for JSC's shallow worker stacks), CAM++ speaker
-  linking, hotwords, thread auto-calibration (hybrid P/E-core laptops:
-  `hardwareConcurrency` is misleading — a ~1.5 s microbenchmark picks the
-  real optimum, cached per device), pause-snapped windows, silence gate,
-  stall watchdog (a stalled window auto-recovers: worker killed, engine
-  reloaded from cache, window skipped — one bad window no longer kills a
-  2 h run).
-- **KV policy**: engine default f16 KV (half the memory of f32, sub-second
-  timestamps preserved; q8 KV snaps timestamps to whole seconds). Long
-  browser windows use **45 s audio-KV eviction** (engine default; v6.x
-  models) instead of q8: flat heap at full f16 precision. The KV buffer is
-  **sized to the eviction window** (300 s window: 728 → 530 MB) with a
-  capacity guard that force-evicts the oldest audio if a timestamp-free
-  decode fills it.
-- **Jetson Nano gen1** (`jetson-nano-gen1` branch): CUDA 10.2 / sm_53 /
-  C++14 / old-ggml adaptation; measured-best split is GPU encode + GPU
-  prefill + CPU decode (GPU decode is host-KV-staging bound). Eviction
-  ported for bounded-memory decode.
-- **Speed levers measured**: CPU pinning (`taskset` P-cores) alone 5.1→7.8
-  tok/s; eviction +20 %; next big lever is in-graph persistent KV +
-  flash-decode (llama.cpp decodes the same arch ~14× faster — implementation
-  headroom, not model cost).
-
----
-
 # Deprecated: VibeVoice-ASR distillation
 
-*(Original plan, kept for the record. Superseded by the MOSS adaptation above.)*
+*(Original plan, kept for the record. Superseded first by a fine-tuned MOSS-TD lineage, then by the purification-first rebuild described above.)*
 
 This README section is the canonical description of the (deprecated) distillation
 plan. Module APIs are defined by the cross-module contract (see
