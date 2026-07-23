@@ -113,7 +113,16 @@ hard meetings). No crashes across ~4 hours of new audio tested.
 
 ### Stage 3 — quantization at equal accuracy. **Done, deployed.**
 
-Deployed: **mixed-precision Q8_0**, 1.55 GB (2.3× smaller than f32).
+Deployed today: **`q4mix-v2`**, 759 MB — every linear at Q4_K, `token_embd`
+at f16, with the decoder tensors taken from a **silence-robust QAT**
+checkpoint (scripts 60–87; see `docs/integration-note-2026-07-23.md`). The
+later q4 campaign superseded this section's "nothing below Q8_0 for the
+encoder" conclusion. `q8mix` (1.55 GB) remains the higher-fidelity option.
+The Q8_0 analysis below is the stage-3 work that mapped the
+quantization-sensitive tensors and led there.
+
+First deployment of this stage: **mixed-precision Q8_0**, 1.55 GB (2.3×
+smaller than f32).
 
 Uniform Q8_0 (0.99 GB) looked fine on short clips and on text-similarity
 metrics (93% char agreement) — but on a 16-minute Chinese meeting it silently
@@ -156,13 +165,16 @@ implied by this stage. Findings so far:
 |---|---|
 | **Pure C++ engine** (byte-identical, MIT-vendored) | [`vieenrose/RapidSpeech.cpp`](https://github.com/vieenrose/RapidSpeech.cpp) branch `moss-pure` |
 | **Live demo** (windowed + linked, deployed) | [`Luigi/moss-transcribe-diarize-cpp`](https://huggingface.co/spaces/Luigi/moss-transcribe-diarize-cpp) |
-| **GGUF weights** (f32 gate reference, deployed q8mix, campplus) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
+| **GGUF weights** (f32 gate reference, deployed q4mix-v2, q8mix, campplus) | [`Luigi/moss-transcribe-diarize-zhtw-gguf`](https://huggingface.co/Luigi/moss-transcribe-diarize-zhtw-gguf) |
 | Reference conversion tooling / parity suite (cited, not vendored) | [`localai-org/moss-transcribe.cpp`](https://github.com/localai-org/moss-transcribe.cpp) (MIT) |
 
-The model repo above also still carries GGUF artifacts from the abandoned
-fine-tuned lineage (`moss-td-zhtw-v5kl…v71-*`) — kept for reference, **not**
-part of the current pipeline; only `moss-transcribe-base-f32.gguf`,
-`moss-transcribe-base-q8mix.gguf`, and `campplus*.gguf` are live.
+2026-07-23 cleanup: the abandoned fine-tuned lineage was removed from the Hub
+— its GGUF artifacts (`moss-td-zhtw-v5kl…v71-*`) were deleted from the model
+repo's tip (recoverable via the repo's git history), and the safetensors
+(`…-zhtw`) and ONNX (`…-zhtw-onnx`) fine-tune repos were deleted outright.
+The GGUF repo now carries only `moss-transcribe-base-f32.gguf` (gate
+reference), `moss-transcribe-base-q4mix-v2.gguf` (deployed),
+`moss-transcribe-base-q8mix.gguf`, and `campplus.gguf`.
 
 ## Open items
 
