@@ -128,11 +128,15 @@ def build_student(kind, teacher):
     t_enc = teacher.model.whisper_encoder
     t_ada = teacher.model.vq_adaptor
 
-    if kind == "prune12":
+    if kind in ("prune12", "prune16"):
         cfg = copy.deepcopy(t_enc.config)
-        cfg.encoder_layers = 12
+        # prune12: every other layer.  prune16: drop every third (keep 2 of 3)
+        # -- the strict-equality retreat after prune12 gated ~4 points short.
+        keep = (list(range(0, 24, 2)) if kind == "prune12"
+                else [i for i in range(24) if i % 3 != 2])
+        cfg.encoder_layers = len(keep)
         enc = WhisperEncoder(cfg)
-        sd, keep, new_sd = t_enc.state_dict(), list(range(0, 24, 2)), {}
+        sd, new_sd = t_enc.state_dict(), {}
         for k, v in sd.items():
             if k.startswith("layers."):
                 i = int(k.split(".")[1])
@@ -190,7 +194,7 @@ def save_model(out_dir, teacher_dir, teacher, enc, ada, kind, d_model):
             setattr(cfg.audio_config, k, v)
         cfg.adaptor_input_dim = d_model * 4
     else:
-        cfg.audio_config.encoder_layers = 12
+        cfg.audio_config.encoder_layers = model.model.whisper_encoder.config.encoder_layers
     model.config = cfg
     model.to(torch.bfloat16).save_pretrained(out)
     # trust_remote_code + processor/tokenizer assets travel with the weights
@@ -205,7 +209,7 @@ def save_model(out_dir, teacher_dir, teacher, enc, ada, kind, d_model):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--teacher", default="models/moss_ft_zhtw_v7")
-    ap.add_argument("--student", default="small", choices=["small", "prune12"])
+    ap.add_argument("--student", default="small", choices=["small", "prune12", "prune16"])
     ap.add_argument("--long-manifest", default="data/pseudo/ivod_ft_v4.jsonl")
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--batch", type=int, default=8)
